@@ -1,9 +1,9 @@
 import { Router } from 'express';
 import { supabase } from './config/supabase';
 
-const router = Router();
+const healthRouter = Router();
 
-router.get('/health', async (req, res) => {
+healthRouter.get('/health', async (req, res) => {
     try {
         // Basic connectivity check: retrieve session
         const { data, error } = await supabase.auth.getSession();
@@ -27,4 +27,4 @@ router.get('/health', async (req, res) => {
     }
 });
 
-export default router;
+export default healthRouter;
