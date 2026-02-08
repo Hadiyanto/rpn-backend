@@ -5,24 +5,27 @@ const healthRouter = Router();
 
 healthRouter.get('/health', async (req, res) => {
     try {
-        // Basic connectivity check: retrieve session
-        const { data, error } = await supabase.auth.getSession();
+        const { data, error } = await supabase
+            .from('health')
+            .select('status')
+            .eq('id', 1)
+            .single();
 
         if (error) {
             throw error;
         }
 
         res.json({
-            status: 'ok',
-            service: 'rpn-backend',
-            timestamp: new Date().toISOString(),
-            supabase: 'connected'
+            response_code: 200,
+            status: data?.status || 'unknown',
+            time: new Date().toISOString()
         });
     } catch (err: any) {
         res.status(500).json({
+            response_code: 500,
             status: 'error',
             message: err.message,
-            supabase: 'disconnected'
+            time: new Date().toISOString()
         });
     }
 });
