@@ -1,18 +1,10 @@
 import { Router } from 'express';
-import { getVariants, getVariantsByMenu } from '../services/variant.service';
+import { getVariants } from '../services/variant.service';
 import { redis } from '../config/redis';
 
 const router = Router();
 
-router.get('/variants/:menuId', async (req, res) => {
-    try {
-        const menuId = Number(req.params['menuId']);
-        const data = await getVariantsByMenu(menuId);
-        res.json({ status: 'ok', data });
-    } catch (e: any) {
-        res.status(500).json({ status: 'error', message: e.message });
-    }
-});
+
 
 router.get('/variants', async (req, res) => {
     try {
