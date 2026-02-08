@@ -10,7 +10,7 @@ const app = express();
 const port = process.env.PORT || 3000;
 
 app.use(cors({
-    origin: ["http://localhost:3000", "http://192.168.18.52:3000", "https://rt-finance-frontend.vercel.app"],
+    origin: ["http://localhost:3000", "http://192.168.18.52:3000", "https://rpn-frontend-omega.vercel.app"],
     methods: ["GET", "POST", "PUT", "PATCH", "DELETE"],
     credentials: true,
 }));
