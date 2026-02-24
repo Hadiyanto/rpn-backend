@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { createOrder, getOrders } from '../services/order.service';
+import { createOrder, getOrders, updateOrderStatus } from '../services/order.service';
 
 const router = Router();
 
@@ -32,4 +32,26 @@ router.get('/orders', async (req, res) => {
     }
 });
 
+router.patch('/order/:id/status', async (req, res) => {
+    try {
+        const id = Number(req.params.id);
+        if (isNaN(id)) {
+            res.status(400).json({ status: 'error', message: 'id tidak valid' });
+            return;
+        }
+
+        const { status } = req.body;
+        if (!status) {
+            res.status(400).json({ status: 'error', message: 'field status wajib diisi' });
+            return;
+        }
+
+        const data = await updateOrderStatus(id, status);
+        res.json({ status: 'ok', data });
+    } catch (e: any) {
+        res.status(400).json({ status: 'error', message: e.message });
+    }
+});
+
 export default router;
+

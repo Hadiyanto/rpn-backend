@@ -105,3 +105,27 @@ export const getOrders = async (filters?: GetOrdersFilter) => {
 
     return data ?? [];
 };
+
+const VALID_STATUSES = ['PENDING', 'CONFIRMED', 'DONE', 'CANCELLED'] as const;
+export type OrderStatus = typeof VALID_STATUSES[number];
+
+export const updateOrderStatus = async (id: number, status: string) => {
+    const upperStatus = status.toUpperCase();
+
+    if (!VALID_STATUSES.includes(upperStatus as OrderStatus)) {
+        throw new Error(`Status tidak valid. Pilihan: ${VALID_STATUSES.join(', ')}`);
+    }
+
+    const { data, error } = await supabase
+        .from('orders')
+        .update({ status: upperStatus })
+        .eq('id', id)
+        .select()
+        .single();
+
+    if (error) throw error;
+    if (!data) throw new Error(`Order dengan id ${id} tidak ditemukan`);
+
+    return data;
+};
+
