@@ -12,6 +12,7 @@ export interface CreateOrderPayload {
     pickup_date: string; // ISO date string e.g. '2026-02-26'
     pickup_time?: string;
     note?: string;
+    payment_method?: string | null;
 }
 
 export interface GetOrdersFilter {
@@ -20,7 +21,7 @@ export interface GetOrdersFilter {
 }
 
 export const createOrder = async (payload: CreateOrderPayload) => {
-    const { customer_name, pesanan, pickup_date, pickup_time, note } = payload;
+    const { customer_name, pesanan, pickup_date, pickup_time, note, payment_method } = payload;
 
     if (!pesanan || pesanan.length === 0) {
         throw new Error('pesanan tidak boleh kosong');
@@ -41,6 +42,7 @@ export const createOrder = async (payload: CreateOrderPayload) => {
             pickup_time: pickup_time ?? '11:00 - 16:00',
             note: note ?? null,
             status: 'UNPAID',
+            payment_method: payment_method ?? null,
         })
         .select()
         .single();
@@ -129,3 +131,16 @@ export const updateOrderStatus = async (id: number, status: string) => {
     return data;
 };
 
+export const updatePaymentMethod = async (id: number, payment_method: string | null) => {
+    const { data, error } = await supabase
+        .from('orders')
+        .update({ payment_method })
+        .eq('id', id)
+        .select()
+        .single();
+
+    if (error) throw error;
+    if (!data) throw new Error(`Order dengan id ${id} tidak ditemukan`);
+
+    return data;
+};
