@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import { createOrder, getOrders, updateOrderStatus, updatePaymentMethod } from '../services/order.service';
+import { sendPushToAll } from '../services/push.service';
 
 const router = Router();
 
@@ -13,6 +14,14 @@ router.post('/order', async (req, res) => {
         }
 
         const data = await createOrder({ customer_name, pesanan, pickup_date, pickup_time, note, payment_method });
+
+        // Fire-and-forget push notification
+        sendPushToAll({
+            title: '🛍️ Order Baru Masuk!',
+            body: `${customer_name} — pickup ${pickup_date}${pickup_time ? ' · ' + pickup_time : ''}`,
+            url: '/orders',
+        }).catch(console.error);
+
         res.json({ status: 'ok', data });
     } catch (e: any) {
         res.status(500).json({ status: 'error', message: e.message });

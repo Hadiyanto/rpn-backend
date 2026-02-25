@@ -7,6 +7,7 @@ import transactionRoute from './transaction.route';
 import penjualanRoute from './penjualan.route';
 import pengeluaranRoute from './pengeluaran.route';
 import orderRoute from './order.route';
+import pushRoute from './push.route';
 
 const router = Router();
 
@@ -17,5 +18,7 @@ router.use(transactionRoute);
 router.use(penjualanRoute);
 router.use(pengeluaranRoute);
 router.use(orderRoute);
+router.use(pushRoute);
 
 export default router;
+
