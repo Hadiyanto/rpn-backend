@@ -40,7 +40,7 @@ export const createOrder = async (payload: CreateOrderPayload) => {
             pickup_date,
             pickup_time: pickup_time ?? '11:00 - 16:00',
             note: note ?? null,
-            status: 'PENDING',
+            status: 'ORDERED',
         })
         .select()
         .single();
