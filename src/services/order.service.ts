@@ -40,7 +40,7 @@ export const createOrder = async (payload: CreateOrderPayload) => {
             pickup_date,
             pickup_time: pickup_time ?? '11:00 - 16:00',
             note: note ?? null,
-            status: 'ORDERED',
+            status: 'UNPAID',
         })
         .select()
         .single();
@@ -106,7 +106,7 @@ export const getOrders = async (filters?: GetOrdersFilter) => {
     return data ?? [];
 };
 
-const VALID_STATUSES = ['ORDERED', 'UNPAID', 'PAID', 'PENDING', 'CONFIRMED', 'DONE', 'CANCELLED'] as const;
+const VALID_STATUSES = ['UNPAID', 'PAID', 'CONFIRMED', 'DONE'] as const;
 export type OrderStatus = typeof VALID_STATUSES[number];
 
 export const updateOrderStatus = async (id: number, status: string) => {
