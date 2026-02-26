@@ -131,6 +131,70 @@ export const updateOrderStatus = async (id: number, status: string) => {
     return data;
 };
 
+export interface UpdateOrderPayload {
+    customer_name?: string;
+    pesanan?: OrderItem[];
+    pickup_date?: string;
+    pickup_time?: string | null;
+    note?: string | null;
+    payment_method?: string | null;
+}
+
+export const updateOrder = async (id: number, payload: UpdateOrderPayload) => {
+    const { customer_name, pesanan, pickup_date, pickup_time, note, payment_method } = payload;
+
+    // 1. Update order header
+    const updateFields: Record<string, unknown> = {};
+    if (customer_name !== undefined) updateFields.customer_name = customer_name;
+    if (pickup_date !== undefined) updateFields.pickup_date = pickup_date;
+    if (pickup_time !== undefined) updateFields.pickup_time = pickup_time;
+    if (note !== undefined) updateFields.note = note;
+    if (payment_method !== undefined) updateFields.payment_method = payment_method;
+
+    const { data: order, error: orderError } = await supabase
+        .from('orders')
+        .update(updateFields)
+        .eq('id', id)
+        .select()
+        .single();
+
+    if (orderError) throw orderError;
+    if (!order) throw new Error(`Order dengan id ${id} tidak ditemukan`);
+
+    // 2. Replace items if provided
+    if (pesanan && pesanan.length > 0) {
+        for (const item of pesanan) {
+            if (item.box_type !== 'FULL' && item.box_type !== 'HALF') {
+                throw new Error(`box_type harus FULL atau HALF, got: ${item.box_type}`);
+            }
+        }
+
+        const { error: deleteError } = await supabase
+            .from('order_items')
+            .delete()
+            .eq('order_id', id);
+
+        if (deleteError) throw deleteError;
+
+        const newItems = pesanan.map((item) => ({
+            order_id: id,
+            box_type: item.box_type,
+            name: item.name,
+            qty: item.qty,
+        }));
+
+        const { error: insertError } = await supabase
+            .from('order_items')
+            .insert(newItems);
+
+        if (insertError) throw insertError;
+
+        return { ...order, items: pesanan };
+    }
+
+    return order;
+};
+
 export const updatePaymentMethod = async (id: number, payment_method: string | null) => {
     const { data, error } = await supabase
         .from('orders')
