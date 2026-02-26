@@ -8,6 +8,7 @@ import penjualanRoute from './penjualan.route';
 import pengeluaranRoute from './pengeluaran.route';
 import orderRoute from './order.route';
 import pushRoute from './push.route';
+import userRoleRoute from './userRole.route';
 
 const router = Router();
 
@@ -19,6 +20,7 @@ router.use(penjualanRoute);
 router.use(pengeluaranRoute);
 router.use(orderRoute);
 router.use(pushRoute);
+router.use(userRoleRoute);
 
 export default router;
 
