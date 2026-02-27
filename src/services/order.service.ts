@@ -1,4 +1,5 @@
 import { supabase } from '../config/supabase';
+import { transaction } from '../config/db';
 
 export interface OrderItem {
     box_type: 'FULL' | 'HALF';
@@ -27,44 +28,67 @@ export const createOrder = async (payload: CreateOrderPayload) => {
         throw new Error('pesanan tidak boleh kosong');
     }
 
+    let requestedQty = 0;
     for (const item of pesanan) {
         if (item.box_type !== 'FULL' && item.box_type !== 'HALF') {
             throw new Error(`box_type harus FULL atau HALF, got: ${item.box_type}`);
         }
+        requestedQty += item.qty;
     }
 
-    // 1. Insert order header
-    const { data: order, error: orderError } = await supabase
-        .from('orders')
-        .insert({
+    return await transaction(async (client) => {
+        // 1. Lock quota row for today to prevent race conditions
+        const quotaRes = await client.query('SELECT qty FROM daily_quota WHERE date = $1 FOR UPDATE', [pickup_date]);
+
+        // If quota isn't defined for this date, assume it's closed/full
+        if (quotaRes.rowCount === 0) {
+            throw new Error(`MOHON MAAF: Penjualan untuk tanggal ${pickup_date} belum dibuka / kuota belum diatur.`);
+        }
+        const maxQuota = quotaRes.rows[0].qty;
+
+        // 2. Dynamically calculate the currently grouped usage for that date
+        //    (excluding CANCELLED orders)
+        const usedRes = await client.query(`
+            SELECT COALESCE(SUM(oi.qty), 0) as used 
+            FROM order_items oi 
+            JOIN orders o ON oi.order_id = o.id 
+            WHERE o.pickup_date = $1 AND o.status != 'CANCELLED'
+        `, [pickup_date]);
+
+        const usedQuota = parseInt(usedRes.rows[0].used, 10);
+
+        // 3. Validation!
+        if (usedQuota + requestedQty > maxQuota) {
+            const sisa = Math.max(0, maxQuota - usedQuota);
+            throw new Error(`MOHON MAAF: Kuota pesanan untuk tanggal ${pickup_date} sudah penuh. (Sisa: ${sisa} box)`);
+        }
+
+        // 4. Insert order header
+        const orderRes = await client.query(`
+            INSERT INTO orders (customer_name, pickup_date, pickup_time, note, status, payment_method) 
+            VALUES ($1, $2, $3, $4, $5, $6) 
+            RETURNING *
+        `, [
             customer_name,
             pickup_date,
-            pickup_time: pickup_time ?? '11:00 - 16:00',
-            note: note ?? null,
-            status: 'UNPAID',
-            payment_method: payment_method ?? null,
-        })
-        .select()
-        .single();
+            pickup_time ?? '11:00 - 16:00',
+            note ?? null,
+            'UNPAID',
+            payment_method ?? null
+        ]);
 
-    if (orderError) throw orderError;
-    if (!order) throw new Error('Gagal membuat order');
+        const order = orderRes.rows[0];
 
-    // 2. Insert order items
-    const items = pesanan.map((item) => ({
-        order_id: order.id,
-        box_type: item.box_type,
-        name: item.name,
-        qty: item.qty,
-    }));
+        // 5. Insert order items
+        for (const item of pesanan) {
+            await client.query(`
+                INSERT INTO order_items (order_id, box_type, name, qty) 
+                VALUES ($1, $2, $3, $4)
+            `, [order.id, item.box_type, item.name, item.qty]);
+        }
 
-    const { error: itemsError } = await supabase
-        .from('order_items')
-        .insert(items);
-
-    if (itemsError) throw itemsError;
-
-    return { ...order, items: pesanan };
+        return { ...order, items: pesanan };
+    });
 };
 
 export const getOrders = async (filters?: GetOrdersFilter) => {

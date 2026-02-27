@@ -9,6 +9,7 @@ import pengeluaranRoute from './pengeluaran.route';
 import orderRoute from './order.route';
 import pushRoute from './push.route';
 import userRoleRoute from './userRole.route';
+import dailyQuotaRoute from './dailyQuota.route';
 
 const router = Router();
 
@@ -21,6 +22,7 @@ router.use(pengeluaranRoute);
 router.use(orderRoute);
 router.use(pushRoute);
 router.use(userRoleRoute);
+router.use(dailyQuotaRoute);
 
 export default router;
 
