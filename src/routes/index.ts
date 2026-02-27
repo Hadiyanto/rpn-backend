@@ -10,6 +10,9 @@ import orderRoute from './order.route';
 import pushRoute from './push.route';
 import userRoleRoute from './userRole.route';
 import dailyQuotaRoute from './dailyQuota.route';
+import capitalRoute from './capital.route';
+import debtRoute from './debt.route';
+import financeRoute from './finance.route';
 
 const router = Router();
 
@@ -23,6 +26,9 @@ router.use(orderRoute);
 router.use(pushRoute);
 router.use(userRoleRoute);
 router.use(dailyQuotaRoute);
+router.use(capitalRoute);
+router.use(debtRoute);
+router.use(financeRoute);
 
 export default router;
 
