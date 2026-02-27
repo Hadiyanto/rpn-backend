@@ -37,8 +37,8 @@ router.patch('/order/:id', async (req, res) => {
             return;
         }
 
-        const { customer_name, pesanan, pickup_date, pickup_time, note, payment_method } = req.body;
-        const data = await updateOrder(id, { customer_name, pesanan, pickup_date, pickup_time, note, payment_method });
+        const { customer_name, pesanan, pickup_date, pickup_time, note, payment_method, transfer_img_url } = req.body;
+        const data = await updateOrder(id, { customer_name, pesanan, pickup_date, pickup_time, note, payment_method, transfer_img_url });
         res.json({ status: 'ok', data });
     } catch (e: any) {
         res.status(500).json({ status: 'error', message: e.message });
