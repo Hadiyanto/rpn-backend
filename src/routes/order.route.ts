@@ -24,7 +24,8 @@ router.post('/order', async (req, res) => {
 
         res.json({ status: 'ok', data });
     } catch (e: any) {
-        res.status(500).json({ status: 'error', message: e.message });
+        console.error('Error creating order:', e);
+        res.status(500).json({ status: 'error', message: e?.message || String(e), detail: e });
     }
 });
 
