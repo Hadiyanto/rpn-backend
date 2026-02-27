@@ -108,7 +108,7 @@ export const getOrders = async (filters?: GetOrdersFilter) => {
     return data ?? [];
 };
 
-const VALID_STATUSES = ['UNPAID', 'PAID', 'CONFIRMED', 'DONE'] as const;
+const VALID_STATUSES = ['UNPAID', 'PAID', 'CONFIRMED', 'DONE', 'CANCELLED'] as const;
 export type OrderStatus = typeof VALID_STATUSES[number];
 
 export const updateOrderStatus = async (id: number, status: string) => {

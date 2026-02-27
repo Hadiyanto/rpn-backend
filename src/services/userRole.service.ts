@@ -9,7 +9,7 @@ export interface UserRole {
 
 const DEFAULT_ROLE: Omit<UserRole, 'user_id' | 'email'> = {
     role: 'staff',
-    allowed_pages: ['orders'],
+    allowed_pages: ['orders', 'sales'],
 };
 
 export const getUserRole = async (userId: string): Promise<UserRole | null> => {
