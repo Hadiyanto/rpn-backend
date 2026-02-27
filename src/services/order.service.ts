@@ -162,6 +162,7 @@ export interface UpdateOrderPayload {
     pickup_time?: string | null;
     note?: string | null;
     payment_method?: string | null;
+    transfer_img_url?: string | null;
 }
 
 export const updateOrder = async (id: number, payload: UpdateOrderPayload) => {
@@ -174,6 +175,7 @@ export const updateOrder = async (id: number, payload: UpdateOrderPayload) => {
     if (pickup_time !== undefined) updateFields.pickup_time = pickup_time;
     if (note !== undefined) updateFields.note = note;
     if (payment_method !== undefined) updateFields.payment_method = payment_method;
+    if (payload.transfer_img_url !== undefined) updateFields.transfer_img_url = payload.transfer_img_url;
 
     const { data: order, error: orderError } = await supabase
         .from('orders')

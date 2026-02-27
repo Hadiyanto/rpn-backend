@@ -13,6 +13,7 @@ import dailyQuotaRoute from './dailyQuota.route';
 import capitalRoute from './capital.route';
 import debtRoute from './debt.route';
 import financeRoute from './finance.route';
+import uploadRoute from './upload.route';
 
 const router = Router();
 
@@ -29,6 +30,7 @@ router.use(dailyQuotaRoute);
 router.use(capitalRoute);
 router.use(debtRoute);
 router.use(financeRoute);
+router.use(uploadRoute);
 
 export default router;
 
