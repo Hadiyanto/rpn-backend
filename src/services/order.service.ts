@@ -134,6 +134,25 @@ export const getOrders = async (filters?: GetOrdersFilter) => {
     return data ?? [];
 };
 
+export const getOrderById = async (id: number) => {
+    const { data, error } = await supabase
+        .from('orders')
+        .select(`
+            *,
+            items:order_items (
+                id,
+                box_type,
+                name,
+                qty
+            )
+        `)
+        .eq('id', id)
+        .single();
+
+    if (error) throw error;
+    return data;
+};
+
 const VALID_STATUSES = ['UNPAID', 'PAID', 'CONFIRMED', 'DONE', 'CANCELLED'] as const;
 export type OrderStatus = typeof VALID_STATUSES[number];
 

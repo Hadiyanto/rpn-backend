@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import rateLimit from 'express-rate-limit';
-import { createOrder, getOrders, updateOrderStatus, updatePaymentMethod, updateOrder, updateTransferImgUrl } from '../services/order.service';
+import { createOrder, getOrders, getOrderById, updateOrderStatus, updatePaymentMethod, updateOrder, updateTransferImgUrl } from '../services/order.service';
 import { sendPushToAll } from '../services/push.service';
 import { getWhatsAppService } from '../services/whatsapp.service';
 
@@ -113,6 +113,26 @@ router.get('/orders', async (req, res) => {
     }
 });
 
+router.get('/order/:id', async (req, res) => {
+    try {
+        const id = Number(req.params.id);
+        if (isNaN(id)) {
+            res.status(400).json({ status: 'error', message: 'id tidak valid' });
+            return;
+        }
+
+        const data = await getOrderById(id);
+        if (!data) {
+            res.status(404).json({ status: 'error', message: 'Order tidak ditemukan' });
+            return;
+        }
+
+        res.json({ status: 'ok', data });
+    } catch (e: any) {
+        res.status(500).json({ status: 'error', message: e.message });
+    }
+});
+
 router.patch('/order/:id/status', async (req, res) => {
     try {
         const id = Number(req.params.id);
@@ -158,34 +178,26 @@ router.patch('/order/:id/status', async (req, res) => {
                         https://maps.app.goo.gl/633auSZ14ucptMDS7
                         `.trim();
 
-                        let waMessage = `Hi {{customer_name}}, makasih ya sudah order 🙌🏻
-
-                        Pesananmu dengan nomor {{order_number}} akan diproses sesuai jadwal {{schedule_date}} ya.
-
-                        Untuk pengambilan bisa via:
-                        🛵 GoSend
-                        🛵 GrabExpress
-                        🛵 Maxim (opsional kalau tersedia di area kamu)
-
-                        Silakan atur driver sesuai jadwal di format order ya.
-
-                        Atau bisa juga pick up langsung ke:
-                        {{pickup_location}}
-
-                        Notes untuk driver:
-                        {{pickup_note}}
-
-                        Patokan:
-                        Belakang Taman Kanak Kanak Widyastuti
-
-                        Terima kasih,
-                        {{sender_name}}`;
+                        let waMessage =
+                            "Hi {{customer_name}}, makasih ya sudah order 🙌🏻\n\n" +
+                            "Pesananmu dengan nomor {{order_number}} akan diproses sesuai jadwal {{schedule_date}} ya.\n\n" +
+                            "Untuk pengambilan bisa via:\n" +
+                            "🛵 GoSend\n" +
+                            "🛵 GrabExpress\n" +
+                            "🛵 Maxim (opsional kalau tersedia di area kamu)\n\n" +
+                            "Silakan atur driver sesuai jadwal di format order ya.\n\n" +
+                            "Atau bisa juga pick up langsung ke:\n" +
+                            "{{pickup_location}}\n\n" +
+                            "Notes untuk driver:\n" +
+                            "{{pickup_note}}\n\n" +
+                            "Terima kasih,\n" +
+                            "{{sender_name}}";
 
                         waMessage = waMessage.replace('{{customer_name}}', targetOrder.customer_name);
                         waMessage = waMessage.replace('{{order_number}}', `#${targetOrder.id}`);
                         waMessage = waMessage.replace('{{schedule_date}}', scheduleDate);
                         waMessage = waMessage.replace('{{pickup_location}}', pickupLocation);
-                        waMessage = waMessage.replace('{{pickup_note}}', 'Ambil pesanan atas nama ' + targetOrder.customer_name);
+                        waMessage = waMessage.replace('{{pickup_note}}', 'Ambil pesanan Pisang Nuggetatas nama ' + targetOrder.customer_name);
                         waMessage = waMessage.replace('{{sender_name}}', 'Anggita');
 
                         let waPhone = targetOrder.customer_phone.replace(/[^0-9]/g, '');
