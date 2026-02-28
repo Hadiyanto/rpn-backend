@@ -12,7 +12,7 @@ export const getDailyQuotas = async () => {
                 dq.updated_at,
                 COALESCE(SUM(oi.qty), 0) as used_qty
             FROM daily_quota dq
-            LEFT JOIN orders o ON o.pickup_date = to_char(dq.date, 'YYYY-MM-DD') AND o.status != 'CANCELLED'
+            LEFT JOIN orders o ON o.pickup_date::text = to_char(dq.date, 'YYYY-MM-DD') AND o.status != 'CANCELLED'
             LEFT JOIN order_items oi ON oi.order_id = o.id
             GROUP BY dq.id, dq.date, dq.qty, dq.created_at, dq.updated_at
             ORDER BY dq.date DESC
@@ -36,7 +36,7 @@ export const getDailyQuotaByDate = async (date: string) => {
                 dq.qty,
                 COALESCE(SUM(oi.qty), 0) as used_qty
             FROM daily_quota dq
-            LEFT JOIN orders o ON o.pickup_date = to_char(dq.date, 'YYYY-MM-DD') AND o.status != 'CANCELLED'
+            LEFT JOIN orders o ON o.pickup_date::text = to_char(dq.date, 'YYYY-MM-DD') AND o.status != 'CANCELLED'
             LEFT JOIN order_items oi ON oi.order_id = o.id
             WHERE to_char(dq.date, 'YYYY-MM-DD') = $1
             GROUP BY dq.id, dq.date, dq.qty
