@@ -14,6 +14,7 @@ class WhatsAppService {
     private sessionName: string;
     private clearStateMethod: (() => Promise<void>) | null = null;
     private logger: any;
+    private sendingQueue: Promise<any> = Promise.resolve();
 
     constructor() {
         this.sock = null;
@@ -142,8 +143,9 @@ class WhatsAppService {
             throw new Error('WhatsApp not connected');
         }
 
-        await this.delay(1500 + Math.random() * 2000); // 1.5 – 3.5 detik random
-        try {
+        const currentTask = this.sendingQueue.then(async () => {
+            await this.delay(1500 + Math.random() * 2000); // 1.5 – 3.5 detik random
+
             // Format phone number (remove +, spaces, etc)
             const formattedPhone = phone.replace(/[^0-9]/g, '');
             const jid = formattedPhone.includes('@s.whatsapp.net')
@@ -152,10 +154,15 @@ class WhatsAppService {
 
             await this.sock.sendMessage(jid, { text: message });
             return { success: true, message: 'Message sent' };
-        } catch (error) {
+        }).catch((error) => {
             console.error('Send message error:', error);
             throw error;
-        }
+        });
+
+        // Ensure the queue recovers if a message fails
+        this.sendingQueue = currentTask.catch(() => { });
+
+        return currentTask;
     }
 
     async sendBroadcast(phones: string[], message: string) {
