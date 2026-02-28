@@ -9,14 +9,18 @@ import { redis } from '../config/redis';
 export const useRedisAuthState = async (sessionName: string): Promise<{ state: AuthenticationState, saveCreds: () => Promise<void>, clearState: () => Promise<void> }> => {
     const credsKey = `${sessionName}:creds`;
 
+    // We will use Baileys BufferJSON stringifier/parser instead of custom implementation
+    const { BufferJSON } = require('@whiskeysockets/baileys');
+
     // Function to read data from Redis
     const readData = async (key: string) => {
         try {
             const data = await redis.get(key);
             if (data) {
-                return JSON.parse(JSON.stringify(data), (k, v) => {
-                    return v && v.type === 'Buffer' ? Buffer.from(v.data) : v;
-                });
+                // If the Upstash response is already an object, use JSON.stringify then BufferJSON.parse.
+                // If it is a string, just BufferJSON.parse.
+                const strData = typeof data === 'string' ? data : JSON.stringify(data);
+                return JSON.parse(strData, BufferJSON.reviver);
             }
         } catch (error) {
             console.error(`Error reading ${key} from Redis:`, error);
@@ -27,9 +31,8 @@ export const useRedisAuthState = async (sessionName: string): Promise<{ state: A
     // Function to write data to Redis
     const writeData = async (key: string, data: any) => {
         try {
-            await redis.set(key, JSON.stringify(data, (k, v) => {
-                return Buffer.isBuffer(v) ? { type: 'Buffer', data: Array.from(v) } : v;
-            }));
+            const strData = JSON.stringify(data, BufferJSON.replacer);
+            await redis.set(key, strData);
         } catch (error) {
             console.error(`Error writing ${key} to Redis:`, error);
         }
@@ -78,6 +81,7 @@ export const useRedisAuthState = async (sessionName: string): Promise<{ state: A
                     if (!ids || ids.length === 0) return data;
 
                     const hashKey = `${sessionName}:${type}`;
+                    // We must use MGET since hmget will return an object for objects from Upstash unless configured differently
                     const results = await redis.hmget<Record<string, any>>(hashKey, ...ids);
 
                     if (!results) return data;
@@ -85,13 +89,15 @@ export const useRedisAuthState = async (sessionName: string): Promise<{ state: A
                     ids.forEach((id, index) => {
                         let value = results[index];
                         if (value) {
-                            let parsed = typeof value === 'string'
-                                ? JSON.parse(value, (k, v) => v && v.type === 'Buffer' ? Buffer.from(v.data) : v)
-                                : JSON.parse(JSON.stringify(value), (k, v) => v && v.type === 'Buffer' ? Buffer.from(v.data) : v);
+                            // Upstash might return a parsed object if it recognized JSON, or a string.
+                            // To be perfectly safe, stringify first if object, then decode with BufferJSON.reviver.
+                            const strValue = typeof value === 'string' ? value : JSON.stringify(value);
+
+                            let parsed = JSON.parse(strValue, BufferJSON.reviver);
 
                             data[id] =
-                                type === 'app-state-sync-key'
-                                    ? proto.Message.AppStateSyncKeyData.fromObject(parsed)
+                                type === 'app-state-sync-key' && parsed
+                                    ? proto.Message.AppStateSyncKeyData.fromObject(parsed as any)
                                     : parsed;
                         }
                     });
@@ -111,12 +117,7 @@ export const useRedisAuthState = async (sessionName: string): Promise<{ state: A
                             const value = dict[id];
 
                             if (value) {
-                                const serialized = JSON.stringify(value, (k, v) =>
-                                    Buffer.isBuffer(v)
-                                        ? { type: 'Buffer', data: Array.from(v) }
-                                        : v
-                                );
-
+                                const serialized = JSON.stringify(value, BufferJSON.replacer);
                                 tasks.push(redis.hset(hashKey, { [id]: serialized }));
                             } else {
                                 tasks.push(redis.hdel(hashKey, id));
