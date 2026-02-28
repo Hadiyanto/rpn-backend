@@ -38,7 +38,8 @@ export const createOrder = async (payload: CreateOrderPayload) => {
     }
 
     return await transaction(async (client) => {
-        // 1. Lock quota row for today to prevent race conditions
+        // --- 1. DAILY QUOTA VALIDATION ---
+        // Lock quota row for today to prevent race conditions
         const quotaRes = await client.query('SELECT qty FROM daily_quota WHERE date = $1 FOR UPDATE', [pickup_date]);
 
         // If quota isn't defined for this date, assume it's closed/full
@@ -47,8 +48,8 @@ export const createOrder = async (payload: CreateOrderPayload) => {
         }
         const maxQuota = quotaRes.rows[0].qty;
 
-        // 2. Dynamically calculate the currently grouped usage for that date
-        //    (excluding CANCELLED orders)
+        // Dynamically calculate the currently grouped usage for that date
+        // (excluding CANCELLED orders)
         const usedRes = await client.query(`
             SELECT COALESCE(SUM(oi.qty), 0) as used 
             FROM order_items oi 
@@ -58,13 +59,46 @@ export const createOrder = async (payload: CreateOrderPayload) => {
 
         const usedQuota = parseInt(usedRes.rows[0].used, 10);
 
-        // 3. Validation!
         if (usedQuota + requestedQty > maxQuota) {
             const sisa = Math.max(0, maxQuota - usedQuota);
-            throw new Error(`MOHON MAAF: Kuota pesanan untuk tanggal ${pickup_date} sudah penuh. (Sisa: ${sisa} box)`);
+            throw new Error(`MOHON MAAF: Kuota Total untuk tanggal ${pickup_date} sudah penuh. (Sisa: ${sisa} box)`);
         }
 
-        // 4. Insert order header
+        // --- 2. HOURLY QUOTA VALIDATION ---
+        if (pickup_time) {
+            const hourStr = pickup_time.split(':')[0] + ':00';
+
+            // Lock hourly quota row
+            const hourlyRes = await client.query(`
+                SELECT qty 
+                FROM hourly_quota 
+                WHERE time_str = $1 AND is_active = true 
+                FOR UPDATE
+            `, [hourStr]);
+
+            if (hourlyRes.rowCount && hourlyRes.rowCount > 0) {
+                const maxHourly = hourlyRes.rows[0].qty;
+
+                // Dynamically calculate the usage for that exact date AND hour block
+                const usedHourlyRes = await client.query(`
+                    SELECT COALESCE(SUM(oi.qty), 0) as used 
+                    FROM order_items oi 
+                    JOIN orders o ON oi.order_id = o.id 
+                    WHERE o.pickup_date = $1 
+                      AND o.pickup_time LIKE $2
+                      AND o.status != 'CANCELLED'
+                `, [pickup_date, `${pickup_time.split(':')[0]}:%`]);
+
+                const usedHourly = parseInt(usedHourlyRes.rows[0].used, 10);
+
+                if (usedHourly + requestedQty > maxHourly) {
+                    const sisaHour = Math.max(0, maxHourly - usedHourly);
+                    throw new Error(`MOHON MAAF: Kuota Jam ${hourStr} di tanggal ${pickup_date} sudah penuh. (Sisa Jam Ini: ${sisaHour} box). Silakan pilih jam lain.`);
+                }
+            }
+        }
+
+        // --- 3. INSERT ORDER ---
         const orderRes = await client.query(`
             INSERT INTO orders (customer_name, customer_phone, pickup_date, pickup_time, note, status, payment_method) 
             VALUES ($1, $2, $3, $4, $5, $6, $7) 

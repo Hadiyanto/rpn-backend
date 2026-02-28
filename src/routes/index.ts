@@ -15,6 +15,7 @@ import debtRoute from './debt.route';
 import financeRoute from './finance.route';
 import uploadRoute from './upload.route';
 import whatsappRoute from './whatsapp.route';
+import hourlyQuotaRoute from './hourlyQuota.route';
 
 const router = Router();
 
@@ -33,6 +34,7 @@ router.use(debtRoute);
 router.use(financeRoute);
 router.use(uploadRoute);
 router.use(whatsappRoute);
+router.use(hourlyQuotaRoute);
 
 export default router;
 
