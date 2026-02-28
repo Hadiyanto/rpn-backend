@@ -1,37 +1,32 @@
 import {
     makeWASocket,
     DisconnectReason,
-    useMultiFileAuthState,
     fetchLatestBaileysVersion
 } from '@whiskeysockets/baileys';
 import pino from 'pino';
 import QRCode from 'qrcode';
-import fs from 'fs';
-import path from 'path';
+import { useRedisAuthState } from '../utils/useRedisAuthState';
 
 class WhatsAppService {
     public sock: any;
     public qr: string | null;
     public isConnected: boolean;
-    private authPath: string;
+    private sessionName: string;
+    private clearStateMethod: (() => Promise<void>) | null = null;
     private logger: any;
 
     constructor() {
         this.sock = null;
         this.qr = null;
         this.isConnected = false;
-        this.authPath = path.join(process.cwd(), 'whatsapp-session');
+        this.sessionName = 'rpn-wa-session';
         this.logger = pino({ level: 'silent' }); // Silent mode to reduce logs
     }
 
     async initialize() {
         try {
-            // Ensure auth directory exists
-            if (!fs.existsSync(this.authPath)) {
-                fs.mkdirSync(this.authPath, { recursive: true });
-            }
-
-            const { state, saveCreds } = await useMultiFileAuthState(this.authPath);
+            const { state, saveCreds, clearState } = await useRedisAuthState(this.sessionName);
+            this.clearStateMethod = clearState;
             const { version } = await fetchLatestBaileysVersion();
 
             this.sock = makeWASocket({
@@ -51,25 +46,25 @@ class WhatsAppService {
                 }
 
                 if (connection === 'close') {
-                    const shouldReconnect = lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut;
-                    console.log('Connection closed, reconnecting:', shouldReconnect);
+                    const statusCode = lastDisconnect?.error?.output?.statusCode;
+                    const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
+
+                    console.log('Connection closed. Status:', statusCode);
 
                     this.isConnected = false;
-                    this.qr = null;
 
                     if (shouldReconnect) {
-                        console.log('Connection closed. User must regenerate manually from Dashboard.');
+                        console.log('Auto reconnecting in 3 seconds...');
+                        setTimeout(() => this.initialize(), 3000);
                     } else {
-                        // Logged out
-                        if (fs.existsSync(this.authPath)) {
-                            try {
-                                fs.rmSync(this.authPath, { recursive: true, force: true, maxRetries: 5, retryDelay: 500 });
-                            } catch (err) {
-                                console.error('Failed to remove session folder:', err);
-                            }
+                        console.log('Logged out. Clearing Redis session...');
+                        if (this.clearStateMethod) {
+                            await this.clearStateMethod();
                         }
                     }
-                } else if (connection === 'open') {
+                }
+
+                if (connection === 'open') {
                     console.log('WhatsApp Connected!');
                     this.isConnected = true;
                     this.qr = null;
@@ -110,12 +105,12 @@ class WhatsAppService {
                 await this.sock.logout();
             }
 
-            // Delete session files
-            if (fs.existsSync(this.authPath)) {
+            // Delete session keys from Redis
+            if (this.clearStateMethod) {
                 try {
-                    fs.rmSync(this.authPath, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+                    await this.clearStateMethod();
                 } catch (err) {
-                    console.error('Failed to remove session folder during regenerate:', err);
+                    console.error('Failed to clear Redis session during regenerate:', err);
                 }
             }
 
