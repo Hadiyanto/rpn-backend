@@ -169,13 +169,13 @@ router.patch('/order/:id/status', async (req, res) => {
                         const scheduleDate = `${dayName}, ${formattedDate}${targetOrder.pickup_time ? ' jam ' + targetOrder.pickup_time : ''}`;
 
                         const pickupLocation = `
-                        Raja Pisang Nugget Kalibata
-                        Taman Kanak Kanak Widyastuti
-                        Jl. Rawajati Timur VIII, Rawajati, Pancoran
-                        Jakarta Selatan 12750
+Raja Pisang Nugget Kalibata
+Taman Kanak Kanak Widyastuti
+Jl. Rawajati Timur VIII, Rawajati, Pancoran
+Jakarta Selatan 12750
 
-                        📍 Google Maps:
-                        https://maps.app.goo.gl/633auSZ14ucptMDS7
+📍 Google Maps:
+https://maps.app.goo.gl/633auSZ14ucptMDS7
                         `.trim();
 
                         let waMessage =
@@ -197,7 +197,7 @@ router.patch('/order/:id/status', async (req, res) => {
                         waMessage = waMessage.replace('{{order_number}}', `#${targetOrder.id}`);
                         waMessage = waMessage.replace('{{schedule_date}}', scheduleDate);
                         waMessage = waMessage.replace('{{pickup_location}}', pickupLocation);
-                        waMessage = waMessage.replace('{{pickup_note}}', 'Ambil pesanan Pisang Nuggetatas nama ' + targetOrder.customer_name);
+                        waMessage = waMessage.replace('{{pickup_note}}', 'Ambil pesanan Pisang Nugget atas nama ' + targetOrder.customer_name);
                         waMessage = waMessage.replace('{{sender_name}}', 'Anggita');
 
                         let waPhone = targetOrder.customer_phone.replace(/[^0-9]/g, '');
