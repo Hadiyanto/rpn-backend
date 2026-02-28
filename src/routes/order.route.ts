@@ -1,11 +1,24 @@
 import { Router } from 'express';
+import rateLimit from 'express-rate-limit';
 import { createOrder, getOrders, updateOrderStatus, updatePaymentMethod, updateOrder } from '../services/order.service';
 import { sendPushToAll } from '../services/push.service';
 import { getWhatsAppService } from '../services/whatsapp.service';
 
 const router = Router();
 
-router.post('/order', async (req, res) => {
+// Rate limiter specifically for creating guest orders (anti-spam / quota lock)
+const orderLimiter = rateLimit({
+    windowMs: 15 * 60 * 1000, // 15 minutes
+    max: 5, // Limit each IP to 5 order creation requests per windowMs
+    message: {
+        status: 'error',
+        message: 'Anda sudah membuat terlalu banyak pesanan hari ini. Silakan coba lagi nanti.'
+    },
+    standardHeaders: true, // Return rate limit info in the `RateLimit-*` headers
+    legacyHeaders: false, // Disable the `X-RateLimit-*` headers
+});
+
+router.post('/order', orderLimiter, async (req, res) => {
     try {
         const { customer_name, customer_phone, pesanan, pickup_date, pickup_time, note, payment_method } = req.body;
 
@@ -115,6 +128,48 @@ router.patch('/order/:id/status', async (req, res) => {
         }
 
         const data = await updateOrderStatus(id, status);
+
+        // Auto-send WhatsApp if status becomes PAID
+        if (status.toUpperCase() === 'PAID') {
+            try {
+                const waService = getWhatsAppService();
+                if (waService.isConnected) {
+                    // Fetch full order to get details (customer name, date, phone)
+                    const orderRes = await getOrders();
+                    const targetOrder = orderRes.find((o: any) => o.id === id);
+
+                    if (targetOrder && targetOrder.customer_phone) {
+                        const dayMap: Record<number, string> = {
+                            0: 'Minggu', 1: 'Senin', 2: 'Selasa', 3: 'Rabu', 4: 'Kamis', 5: 'Jumat', 6: 'Sabtu',
+                        };
+
+                        const dateObj = new Date(`${targetOrder.pickup_date}T00:00:00+07:00`);
+                        const dayName = dayMap[dateObj.getDay()] ?? '';
+                        const formattedDate = dateObj.toLocaleDateString('id-ID', { day: 'numeric', month: 'long', year: 'numeric', timeZone: 'Asia/Jakarta' });
+                        const scheduleDate = `${dayName}, ${formattedDate}${targetOrder.pickup_time ? ' jam ' + targetOrder.pickup_time : ''}`;
+
+                        let waMessage = "Hi {{customer_name}}, makasih ya sudah order 🙌🏻\n\nPesananmu dengan nomor {{order_number}} akan diproses sesuai jadwal {{schedule_date}} ya.\n\nUntuk pengambilan bisa via:\n🛵 GoSend\n🛵 GrabExpress\n🛵 Maxim (opsional kalau tersedia di area kamu)\n\nSilakan atur driver sesuai jadwal di format order ya.\n\nAtau bisa juga pick up langsung ke:\n{{pickup_location}}\n\nNotes untuk driver:\n{{pickup_note}}\n\nTerima kasih,\n{{sender_name}}";
+
+                        waMessage = waMessage.replace('{{customer_name}}', targetOrder.customer_name);
+                        waMessage = waMessage.replace('{{order_number}}', `#${targetOrder.id}`);
+                        waMessage = waMessage.replace('{{schedule_date}}', scheduleDate);
+                        waMessage = waMessage.replace('{{pickup_location}}', 'Perumahan RPN Blok A No 1');
+                        waMessage = waMessage.replace('{{pickup_note}}', 'Ambil kue atas nama ' + targetOrder.customer_name);
+                        waMessage = waMessage.replace('{{sender_name}}', 'Anggita');
+
+                        let waPhone = targetOrder.customer_phone.replace(/[^0-9]/g, '');
+                        if (waPhone.startsWith('0')) waPhone = '62' + waPhone.substring(1);
+
+                        waService.sendMessage(waPhone, waMessage).catch(err => {
+                            console.error('Auto WA Send Error on PAID:', err);
+                        });
+                    }
+                }
+            } catch (waErr) {
+                console.error('Failed to prepare auto WA message on PAID:', waErr);
+            }
+        }
+
         res.json({ status: 'ok', data });
     } catch (e: any) {
         res.status(400).json({ status: 'error', message: e.message });

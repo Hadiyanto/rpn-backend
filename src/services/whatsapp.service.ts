@@ -23,6 +23,10 @@ class WhatsAppService {
         this.logger = pino({ level: 'silent' }); // Silent mode to reduce logs
     }
 
+    private delay(ms: number) {
+        return new Promise(resolve => setTimeout(resolve, ms));
+    }
+
     async initialize() {
         try {
             const { state, saveCreds, clearState } = await useRedisAuthState(this.sessionName);
@@ -138,6 +142,7 @@ class WhatsAppService {
             throw new Error('WhatsApp not connected');
         }
 
+        await this.delay(1500 + Math.random() * 2000); // 1.5 – 3.5 detik random
         try {
             // Format phone number (remove +, spaces, etc)
             const formattedPhone = phone.replace(/[^0-9]/g, '');
