@@ -38,7 +38,7 @@ class WhatsAppService {
                 version,
                 logger: this.logger,
                 auth: state,
-                browser: ['RPN System', 'Chrome', '1.0.0'],
+                browser: ['RPN', 'Chrome', '1.0.0'],
             });
 
             // Connection updates
@@ -58,12 +58,15 @@ class WhatsAppService {
                     this.qr = null;
 
                     if (shouldReconnect) {
-                        console.log('Connection closed. Will retry in 1 minute...');
-                        setTimeout(() => this.initialize(), 60000); // 1 min delay
+                        console.log('Connection closed. User must regenerate manually from Dashboard.');
                     } else {
                         // Logged out
                         if (fs.existsSync(this.authPath)) {
-                            fs.rmSync(this.authPath, { recursive: true, force: true });
+                            try {
+                                fs.rmSync(this.authPath, { recursive: true, force: true, maxRetries: 5, retryDelay: 500 });
+                            } catch (err) {
+                                console.error('Failed to remove session folder:', err);
+                            }
                         }
                     }
                 } else if (connection === 'open') {
@@ -109,7 +112,11 @@ class WhatsAppService {
 
             // Delete session files
             if (fs.existsSync(this.authPath)) {
-                fs.rmSync(this.authPath, { recursive: true, force: true });
+                try {
+                    fs.rmSync(this.authPath, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+                } catch (err) {
+                    console.error('Failed to remove session folder during regenerate:', err);
+                }
             }
 
             // Reinitialize
