@@ -236,3 +236,24 @@ export const updatePaymentMethod = async (id: number, payment_method: string | n
 
     return data;
 };
+
+export const updateTransferImgUrl = async (id: number, transfer_img_url: string | null) => {
+    return await transaction(async (client) => {
+        // 1. Lock the order row specifically against concurrent modifications
+        const res = await client.query('SELECT id FROM orders WHERE id = $1 FOR UPDATE', [id]);
+
+        if (res.rowCount === 0) {
+            throw new Error(`Order dengan id ${id} tidak ditemukan`);
+        }
+
+        // 2. Perform the update safely within the lock
+        const updateRes = await client.query(`
+            UPDATE orders 
+            SET transfer_img_url = $1
+            WHERE id = $2
+            RETURNING *
+        `, [transfer_img_url, id]);
+
+        return updateRes.rows[0];
+    });
+};

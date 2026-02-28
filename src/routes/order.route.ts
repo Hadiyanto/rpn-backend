@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import rateLimit from 'express-rate-limit';
-import { createOrder, getOrders, updateOrderStatus, updatePaymentMethod, updateOrder } from '../services/order.service';
+import { createOrder, getOrders, updateOrderStatus, updatePaymentMethod, updateOrder, updateTransferImgUrl } from '../services/order.service';
 import { sendPushToAll } from '../services/push.service';
 import { getWhatsAppService } from '../services/whatsapp.service';
 
@@ -47,7 +47,7 @@ router.post('/order', orderLimiter, async (req, res) => {
                 // It's better to fetch it or rely on the frontend payload. But the user didn't mention sending amount from frontend.
                 // Wait, creating the order doesn't calculate amount either. Let's just use the template provided by the user.
 
-                const uploadLink = `${process.env.FRONTEND_URL || 'http://localhost:3001'}/pesan`;
+                const uploadLink = `${process.env.FRONTEND_URL || 'http://localhost:3001'}/bukti-transfer/${data.id}`;
                 // The provided template from user:
                 // "Hai {{customer_name}}, pesanannya sudah diterima ya.\n\nDetail Pesanan:\n{{order_details}}\n\nJumlah: {{total_box}} box\nTotal: Rp {{total_amount}}\n\nPembayaran bisa melalui:\nBank: BCA\nNo Rek: 123456789\nA/N: Anggita Prima\n\nMohon konfirmasi bukti pembayarannya melalui link berikut:\n{{upload_link}}\n\nTerima kasih,\nAnggita"
 
@@ -186,6 +186,27 @@ router.patch('/order/:id/payment-method', async (req, res) => {
 
         const { payment_method } = req.body;
         const data = await updatePaymentMethod(id, payment_method ?? null);
+        res.json({ status: 'ok', data });
+    } catch (e: any) {
+        res.status(400).json({ status: 'error', message: e.message });
+    }
+});
+
+router.patch('/order/:id/transfer-img-url', async (req, res) => {
+    try {
+        const id = Number(req.params.id);
+        if (isNaN(id)) {
+            res.status(400).json({ status: 'error', message: 'id tidak valid' });
+            return;
+        }
+
+        const { transfer_img_url } = req.body;
+        if (!transfer_img_url) {
+            res.status(400).json({ status: 'error', message: 'transfer_img_url wajib diisi' });
+            return;
+        }
+
+        const data = await updateTransferImgUrl(id, transfer_img_url);
         res.json({ status: 'ok', data });
     } catch (e: any) {
         res.status(400).json({ status: 'error', message: e.message });
