@@ -57,7 +57,7 @@ router.post('/order', orderLimiter, async (req, res) => {
 
                 const totalAmount = pesanan.reduce((sum: number, p: any) => sum + (p.qty * (menuMap.get(p.box_type) || 0)), 0);
 
-                let waMessage = "Hai {{customer_name}}, pesanannya sudah diterima ya.\n\nDetail Pesanan:\n{{order_details}}\n\nJumlah: {{total_box}} box\nTotal: Rp {{total_amount}}\n\nPembayaran bisa melalui:\nBank: BCA\nNo Rek: 123456789\nA/N: Anggita Prima\n\nMohon konfirmasi bukti pembayarannya melalui link berikut:\n{{upload_link}}\n\nTerima kasih,\nAnggita";
+                let waMessage = "Hai {{customer_name}}, pesanannya sudah diterima ya.\n\nDetail Pesanan:\n{{order_details}}\n\nJumlah: {{total_box}} box\nTotal: Rp {{total_amount}}\n\nPembayaran bisa melalui:\nBank: BCA\nNo Rek: 1280119748\nA/N: Anggita Prima\n\nMohon konfirmasi bukti pembayarannya melalui link berikut:\n{{upload_link}}\n\nTerima kasih,\nAnggita";
 
                 waMessage = waMessage.replace('{{customer_name}}', customer_name);
                 waMessage = waMessage.replace('{{order_details}}', orderDetails);
@@ -148,13 +148,44 @@ router.patch('/order/:id/status', async (req, res) => {
                         const formattedDate = dateObj.toLocaleDateString('id-ID', { day: 'numeric', month: 'long', year: 'numeric', timeZone: 'Asia/Jakarta' });
                         const scheduleDate = `${dayName}, ${formattedDate}${targetOrder.pickup_time ? ' jam ' + targetOrder.pickup_time : ''}`;
 
-                        let waMessage = "Hi {{customer_name}}, makasih ya sudah order 🙌🏻\n\nPesananmu dengan nomor {{order_number}} akan diproses sesuai jadwal {{schedule_date}} ya.\n\nUntuk pengambilan bisa via:\n🛵 GoSend\n🛵 GrabExpress\n🛵 Maxim (opsional kalau tersedia di area kamu)\n\nSilakan atur driver sesuai jadwal di format order ya.\n\nAtau bisa juga pick up langsung ke:\n{{pickup_location}}\n\nNotes untuk driver:\n{{pickup_note}}\n\nTerima kasih,\n{{sender_name}}";
+                        const pickupLocation = `
+                        Raja Pisang Nugget Kalibata
+                        Taman Kanak Kanak Widyastuti
+                        Jl. Rawajati Timur VIII, Rawajati, Pancoran
+                        Jakarta Selatan 12750
+
+                        📍 Google Maps:
+                        https://maps.app.goo.gl/633auSZ14ucptMDS7
+                        `.trim();
+
+                        let waMessage = `Hi {{customer_name}}, makasih ya sudah order 🙌🏻
+
+                        Pesananmu dengan nomor {{order_number}} akan diproses sesuai jadwal {{schedule_date}} ya.
+
+                        Untuk pengambilan bisa via:
+                        🛵 GoSend
+                        🛵 GrabExpress
+                        🛵 Maxim (opsional kalau tersedia di area kamu)
+
+                        Silakan atur driver sesuai jadwal di format order ya.
+
+                        Atau bisa juga pick up langsung ke:
+                        {{pickup_location}}
+
+                        Notes untuk driver:
+                        {{pickup_note}}
+
+                        Patokan:
+                        Belakang Taman Kanak Kanak Widyastuti
+
+                        Terima kasih,
+                        {{sender_name}}`;
 
                         waMessage = waMessage.replace('{{customer_name}}', targetOrder.customer_name);
                         waMessage = waMessage.replace('{{order_number}}', `#${targetOrder.id}`);
                         waMessage = waMessage.replace('{{schedule_date}}', scheduleDate);
-                        waMessage = waMessage.replace('{{pickup_location}}', 'Perumahan RPN Blok A No 1');
-                        waMessage = waMessage.replace('{{pickup_note}}', 'Ambil kue atas nama ' + targetOrder.customer_name);
+                        waMessage = waMessage.replace('{{pickup_location}}', pickupLocation);
+                        waMessage = waMessage.replace('{{pickup_note}}', 'Ambil pesanan atas nama ' + targetOrder.customer_name);
                         waMessage = waMessage.replace('{{sender_name}}', 'Anggita');
 
                         let waPhone = targetOrder.customer_phone.replace(/[^0-9]/g, '');
