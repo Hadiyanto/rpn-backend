@@ -16,14 +16,28 @@ export const useRedisAuthState = async (sessionName: string): Promise<{
 
     const credsKey = `${sessionName}:creds`;
 
+    // -------- SAFE READ (handle string OR object) --------
     const readData = async (key: string) => {
-        const data = await redis.get<string>(key);
+        const data = await redis.get(key);
         if (!data) return null;
-        return JSON.parse(data, BufferJSON.reviver);
+
+        if (typeof data === "string") {
+            return JSON.parse(data, BufferJSON.reviver);
+        }
+
+        // Upstash may auto-parse JSON
+        return JSON.parse(JSON.stringify(data), BufferJSON.reviver);
     };
 
+    // -------- SAFE WRITE --------
     const writeData = async (key: string, value: any) => {
-        await redis.set(key, JSON.stringify(value, BufferJSON.replacer));
+        await redis.set(
+            key,
+            JSON.stringify(
+                value,
+                (key, val) => BufferJSON.replacer(key, val)
+            )
+        );
     };
 
     const clearState = async () => {
@@ -42,18 +56,32 @@ export const useRedisAuthState = async (sessionName: string): Promise<{
             keys: {
                 get: async (type, ids) => {
                     const data: { [id: string]: SignalDataTypeMap[typeof type] } = {};
-                    if (!ids || ids.length === 0) return data;
+                    if (!ids?.length) return data;
 
                     const hashKey = `${sessionName}:${type}`;
 
-                    // Upstash hmget typed to return a Record
-                    const results = await redis.hmget<Record<string, string>>(hashKey, ...ids);
+                    const raw = await redis.hmget(hashKey, ...ids);
 
-                    ids.forEach((id) => {
-                        const value = results?.[id];
+                    let results: any[] = [];
+
+                    // Upstash can return array OR object
+                    if (Array.isArray(raw)) {
+                        results = raw;
+                    } else if (raw && typeof raw === "object") {
+                        results = ids.map(id => raw[id] ?? null);
+                    }
+
+                    ids.forEach((id, index) => {
+                        const value = results[index];
                         if (!value) return;
 
-                        const parsed = JSON.parse(value, BufferJSON.reviver);
+                        let parsed;
+
+                        if (typeof value === "string") {
+                            parsed = JSON.parse(value, BufferJSON.reviver);
+                        } else {
+                            parsed = JSON.parse(JSON.stringify(value), BufferJSON.reviver);
+                        }
 
                         data[id] =
                             type === "app-state-sync-key"
@@ -77,7 +105,12 @@ export const useRedisAuthState = async (sessionName: string): Promise<{
                             if (value) {
                                 await redis.hset(
                                     hashKey,
-                                    { [id]: JSON.stringify(value, BufferJSON.replacer) }
+                                    {
+                                        [id]: JSON.stringify(
+                                            value,
+                                            (key, val) => BufferJSON.replacer(key, val)
+                                        )
+                                    }
                                 );
                             } else {
                                 await redis.hdel(hashKey, id);

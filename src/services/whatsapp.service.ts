@@ -105,28 +105,27 @@ class WhatsAppService {
 
     async regenerateQR() {
         try {
-            // Logout current session
-            if (this.sock) {
-                await this.sock.logout();
-            }
-
-            // Delete session keys from Redis
-            if (this.clearStateMethod) {
+            if (this.sock && this.isConnected) {
                 try {
-                    await this.clearStateMethod();
+                    await this.sock.logout();
                 } catch (err) {
-                    console.error('Failed to clear Redis session during regenerate:', err);
+                    console.log("Logout skipped (already closed)");
                 }
             }
 
-            // Reinitialize
+            if (this.clearStateMethod) {
+                await this.clearStateMethod();
+            }
+
             this.isConnected = false;
             this.qr = null;
+
             await this.initialize();
 
-            return { success: true, message: 'QR regenerated, please scan' };
+            return { success: true, message: "QR regenerated" };
+
         } catch (error: any) {
-            console.error('Regenerate QR error:', error);
+            console.error("Regenerate QR error:", error);
             return { success: false, error: error.message };
         }
     }
