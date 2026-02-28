@@ -188,7 +188,7 @@ https://maps.app.goo.gl/633auSZ14ucptMDS7
                             "Silakan atur driver sesuai jadwal di format order ya.\n\n" +
                             "Atau bisa juga pick up langsung ke:\n" +
                             "{{pickup_location}}\n\n" +
-                            "Notes untuk driver:\n" +
+                            "*Notes untuk driver:*\n" +
                             "{{pickup_note}}\n\n" +
                             "Terima kasih,\n" +
                             "{{sender_name}}";
@@ -197,7 +197,7 @@ https://maps.app.goo.gl/633auSZ14ucptMDS7
                         waMessage = waMessage.replace('{{order_number}}', `#${targetOrder.id}`);
                         waMessage = waMessage.replace('{{schedule_date}}', scheduleDate);
                         waMessage = waMessage.replace('{{pickup_location}}', pickupLocation);
-                        waMessage = waMessage.replace('{{pickup_note}}', 'Ambil pesanan Pisang Nugget atas nama ' + targetOrder.customer_name);
+                        waMessage = waMessage.replace('{{pickup_note}}', '*Ambil pesanan Pisang Nugget*\n\nAtas nama ' + targetOrder.customer_name);
                         waMessage = waMessage.replace('{{sender_name}}', 'Anggita');
 
                         let waPhone = targetOrder.customer_phone.replace(/[^0-9]/g, '');
