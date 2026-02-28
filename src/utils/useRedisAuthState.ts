@@ -75,33 +75,55 @@ export const useRedisAuthState = async (sessionName: string): Promise<{ state: A
             keys: {
                 get: async (type, ids) => {
                     const data: { [id: string]: SignalDataTypeMap[typeof type] } = {};
-                    await Promise.all(
-                        ids.map(async (id) => {
-                            let value = await readData(`${sessionName}:${type}-${id}`);
-                            if (type === 'app-state-sync-key' && value) {
-                                value = proto.Message.AppStateSyncKeyData.fromObject(value);
-                            }
-                            data[id] = value;
-                        })
-                    );
+                    if (!ids || ids.length === 0) return data;
+
+                    const hashKey = `${sessionName}:${type}`;
+                    const results = await redis.hmget<Record<string, any>>(hashKey, ...ids);
+
+                    if (!results) return data;
+
+                    ids.forEach((id, index) => {
+                        let value = results[index];
+                        if (value) {
+                            let parsed = typeof value === 'string'
+                                ? JSON.parse(value, (k, v) => v && v.type === 'Buffer' ? Buffer.from(v.data) : v)
+                                : JSON.parse(JSON.stringify(value), (k, v) => v && v.type === 'Buffer' ? Buffer.from(v.data) : v);
+
+                            data[id] =
+                                type === 'app-state-sync-key'
+                                    ? proto.Message.AppStateSyncKeyData.fromObject(parsed)
+                                    : parsed;
+                        }
+                    });
+
                     return data;
                 },
                 set: async (data: any) => {
-                    const tasks: Promise<void>[] = [];
+                    const tasks: Promise<any>[] = [];
+
                     for (const category of Object.keys(data)) {
                         const dict = data[category];
-                        if (dict) {
-                            for (const id of Object.keys(dict)) {
-                                const value = dict[id];
-                                const key = `${sessionName}:${category}-${id}`;
-                                if (value) {
-                                    tasks.push(writeData(key, value));
-                                } else {
-                                    tasks.push(removeData(key));
-                                }
+                        if (!dict) continue;
+
+                        const hashKey = `${sessionName}:${category}`;
+
+                        for (const id of Object.keys(dict)) {
+                            const value = dict[id];
+
+                            if (value) {
+                                const serialized = JSON.stringify(value, (k, v) =>
+                                    Buffer.isBuffer(v)
+                                        ? { type: 'Buffer', data: Array.from(v) }
+                                        : v
+                                );
+
+                                tasks.push(redis.hset(hashKey, { [id]: serialized }));
+                            } else {
+                                tasks.push(redis.hdel(hashKey, id));
                             }
                         }
                     }
+
                     await Promise.all(tasks);
                 }
             }
