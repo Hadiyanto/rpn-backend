@@ -1,6 +1,8 @@
 import express from 'express';
 import cors from 'cors';
 import dotenv from 'dotenv';
+import rateLimit from 'express-rate-limit';
+
 import healthRouter from './health';
 import apiRoutes from './routes';
 
@@ -10,6 +12,16 @@ dotenv.config();
 
 const app = express();
 const port = process.env.PORT || 3000;
+
+// 🔥 WAJIB kalau deploy di Render / Railway / Heroku
+app.set('trust proxy', 1);
+
+const limiter = rateLimit({
+    windowMs: 60 * 1000,
+    max: 10
+});
+
+app.use(limiter);
 
 app.use(cors({
     origin: ["http://localhost:3000", "http://192.168.18.52:3000", "https://rpn-frontend-omega.vercel.app"],
