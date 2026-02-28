@@ -4,6 +4,8 @@ import dotenv from 'dotenv';
 import healthRouter from './health';
 import apiRoutes from './routes';
 
+import { getWhatsAppService } from './services/whatsapp.service';
+
 dotenv.config();
 
 const app = express();
@@ -25,6 +27,12 @@ app.use('/api', apiRoutes);
 
 app.listen(port, () => {
     console.log(`[server]: Server is running at http://localhost:${port}`);
+
+    // Initialize WhatsApp service
+    const waService = getWhatsAppService();
+    waService.initialize().catch(err => {
+        console.error('WhatsApp initialization failed:', err);
+    });
 });
 
 export default app;

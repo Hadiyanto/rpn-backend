@@ -15,6 +15,7 @@
   "dependencies": {
     "@supabase/supabase-js": "^2.39.3",
     "@upstash/redis": "^1.36.2",
+    "@whiskeysockets/baileys": "^7.0.0-rc.9",
     "cloudinary": "^2.9.0",
     "cors": "^2.8.5",
     "dotenv": "^16.4.1",
@@ -22,6 +23,8 @@
     "multer": "^2.1.0",
     "node-pg-migrate": "^8.0.4",
     "pg": "^8.18.0",
+    "pino": "^10.3.1",
+    "qrcode": "^1.5.4",
     "web-push": "^3.6.7"
   },
   "devDependencies": {
@@ -30,6 +33,7 @@
     "@types/multer": "^2.0.0",
     "@types/node": "^20.11.16",
     "@types/pg": "^8.16.0",
+    "@types/qrcode": "^1.5.6",
     "@types/web-push": "^3.6.4",
     "nodemon": "^3.0.3",
     "ts-node": "^10.9.2",
