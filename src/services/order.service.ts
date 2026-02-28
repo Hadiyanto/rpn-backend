@@ -9,6 +9,7 @@ export interface OrderItem {
 
 export interface CreateOrderPayload {
     customer_name: string;
+    customer_phone: string;
     pesanan: OrderItem[];
     pickup_date: string; // ISO date string e.g. '2026-02-26'
     pickup_time?: string;
@@ -22,7 +23,7 @@ export interface GetOrdersFilter {
 }
 
 export const createOrder = async (payload: CreateOrderPayload) => {
-    const { customer_name, pesanan, pickup_date, pickup_time, note, payment_method } = payload;
+    const { customer_name, customer_phone, pesanan, pickup_date, pickup_time, note, payment_method } = payload;
 
     if (!pesanan || pesanan.length === 0) {
         throw new Error('pesanan tidak boleh kosong');
@@ -65,11 +66,12 @@ export const createOrder = async (payload: CreateOrderPayload) => {
 
         // 4. Insert order header
         const orderRes = await client.query(`
-            INSERT INTO orders (customer_name, pickup_date, pickup_time, note, status, payment_method) 
-            VALUES ($1, $2, $3, $4, $5, $6) 
+            INSERT INTO orders (customer_name, customer_phone, pickup_date, pickup_time, note, status, payment_method) 
+            VALUES ($1, $2, $3, $4, $5, $6, $7) 
             RETURNING *
         `, [
             customer_name,
+            customer_phone,
             pickup_date,
             pickup_time ?? '11:00 - 16:00',
             note ?? null,

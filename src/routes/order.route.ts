@@ -6,14 +6,14 @@ const router = Router();
 
 router.post('/order', async (req, res) => {
     try {
-        const { customer_name, pesanan, pickup_date, pickup_time, note, payment_method } = req.body;
+        const { customer_name, customer_phone, pesanan, pickup_date, pickup_time, note, payment_method } = req.body;
 
-        if (!customer_name || !pesanan || !pickup_date) {
-            res.status(400).json({ status: 'error', message: 'customer_name, pesanan, dan pickup_date wajib diisi' });
+        if (!customer_name || !customer_phone || !pesanan || !pickup_date) {
+            res.status(400).json({ status: 'error', message: 'customer_name, customer_phone, pesanan, dan pickup_date wajib diisi' });
             return;
         }
 
-        const data = await createOrder({ customer_name, pesanan, pickup_date, pickup_time, note, payment_method });
+        const data = await createOrder({ customer_name, customer_phone, pesanan, pickup_date, pickup_time, note, payment_method });
 
         // Fire-and-forget push notification
         sendPushToAll({
