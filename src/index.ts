@@ -20,9 +20,15 @@ const limiter = rateLimit({
     windowMs: 60 * 1000,
     max: 10,
     skip: (req) => {
-        // Skip rate limiting for endpoints that require frequent polling
-        const path = req.path;
-        return path === '/api/whatsapp/qr' || path === '/api/whatsapp/status';
+        // Skip rate limiting for endpoints that require frequent polling or parallel fetching
+        const p = req.path;
+        return p.includes('/api/whatsapp/qr') ||
+            p.includes('/api/whatsapp/status') ||
+            p.includes('/api/whatsapp/contacts') ||
+            p.includes('/api/menu') ||
+            p.includes('/api/variants') ||
+            p.includes('/api/daily-quota') ||
+            p.includes('/api/hourly-quota');
     }
 });
 
