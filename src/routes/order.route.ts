@@ -30,9 +30,17 @@ router.post('/order', orderLimiter, async (req, res) => {
         const data = await createOrder({ customer_name, customer_phone, pesanan, pickup_date, pickup_time, note, payment_method });
 
         // Fire-and-forget push notification
+        let scheduleDateStr = pickup_date;
+        try {
+            const dateObj = new Date(`${pickup_date}T00:00:00+07:00`);
+            scheduleDateStr = dateObj.toLocaleDateString('id-ID', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric', timeZone: 'Asia/Jakarta' });
+        } catch (e) {
+            // fallback to raw string
+        }
+
         sendPushToAll({
             title: '🛍️ Order Baru Masuk!',
-            body: `${customer_name} — pickup ${pickup_date}${pickup_time ? ' · ' + pickup_time : ''}`,
+            body: `${customer_name} — pickup ${scheduleDateStr}${pickup_time ? ' · ' + pickup_time : ''}`,
             url: '/orders',
         }).catch(console.error);
 
@@ -159,14 +167,9 @@ router.patch('/order/:id/status', async (req, res) => {
                     const targetOrder = orderRes.find((o: any) => o.id === id);
 
                     if (targetOrder && targetOrder.customer_phone) {
-                        const dayMap: Record<number, string> = {
-                            0: 'Minggu', 1: 'Senin', 2: 'Selasa', 3: 'Rabu', 4: 'Kamis', 5: 'Jumat', 6: 'Sabtu',
-                        };
-
                         const dateObj = new Date(`${targetOrder.pickup_date}T00:00:00+07:00`);
-                        const dayName = dayMap[dateObj.getDay()] ?? '';
-                        const formattedDate = dateObj.toLocaleDateString('id-ID', { day: 'numeric', month: 'long', year: 'numeric', timeZone: 'Asia/Jakarta' });
-                        const scheduleDate = `${dayName}, ${formattedDate}${targetOrder.pickup_time ? ' jam ' + targetOrder.pickup_time : ''}`;
+                        const scheduleDateStr = dateObj.toLocaleDateString('id-ID', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric', timeZone: 'Asia/Jakarta' });
+                        const scheduleDate = `${scheduleDateStr}${targetOrder.pickup_time ? ' jam ' + targetOrder.pickup_time : ''}`;
 
                         const pickupLocation = `
 Raja Pisang Nugget Kalibata
