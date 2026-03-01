@@ -31,7 +31,7 @@ export const getHourlyAvailability = async (date: string): Promise<(HourlyQuota 
                 hq.time_str, 
                 hq.qty, 
                 hq.is_active,
-                COALESCE(SUM(oi.qty), 0) as used_qty
+                COALESCE(SUM(CASE WHEN oi.box_type = 'HALF' THEN oi.qty * 0.5 ELSE oi.qty END), 0) as used_qty
             FROM hourly_quota hq
             LEFT JOIN orders o ON o.pickup_date = $1 AND o.pickup_time LIKE (substring(hq.time_str, 1, 2) || '%') AND o.status != 'CANCELLED'
             LEFT JOIN order_items oi ON oi.order_id = o.id
@@ -41,8 +41,8 @@ export const getHourlyAvailability = async (date: string): Promise<(HourlyQuota 
     });
 
     return res.rows.map(row => {
-        const qty = parseInt(row.qty, 10);
-        const used_qty = parseInt(row.used_qty, 10);
+        const qty = parseFloat(row.qty);
+        const used_qty = parseFloat(row.used_qty);
         return {
             ...row,
             qty,

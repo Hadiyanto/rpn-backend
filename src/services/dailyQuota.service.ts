@@ -10,7 +10,7 @@ export const getDailyQuotas = async () => {
                 dq.qty,
                 dq.created_at,
                 dq.updated_at,
-                COALESCE(SUM(oi.qty), 0) as used_qty
+                COALESCE(SUM(CASE WHEN oi.box_type = 'HALF' THEN oi.qty * 0.5 ELSE oi.qty END), 0) as used_qty
             FROM daily_quota dq
             LEFT JOIN orders o ON o.pickup_date::text = to_char(dq.date, 'YYYY-MM-DD') AND o.status != 'CANCELLED'
             LEFT JOIN order_items oi ON oi.order_id = o.id
@@ -19,12 +19,16 @@ export const getDailyQuotas = async () => {
         `);
     });
 
-    return res.rows.map(row => ({
-        ...row,
-        qty: parseInt(row.qty, 10),
-        used_qty: parseInt(row.used_qty, 10),
-        remaining_qty: Math.max(0, parseInt(row.qty, 10) - parseInt(row.used_qty, 10))
-    }));
+    return res.rows.map(row => {
+        const qty = parseFloat(row.qty);
+        const used_qty = parseFloat(row.used_qty);
+        return {
+            ...row,
+            qty,
+            used_qty,
+            remaining_qty: Math.max(0, qty - used_qty)
+        };
+    });
 };
 
 export const getDailyQuotaByDate = async (date: string) => {
@@ -34,7 +38,7 @@ export const getDailyQuotaByDate = async (date: string) => {
                 dq.id,
                 to_char(dq.date, 'YYYY-MM-DD') as date,
                 dq.qty,
-                COALESCE(SUM(oi.qty), 0) as used_qty
+                COALESCE(SUM(CASE WHEN oi.box_type = 'HALF' THEN oi.qty * 0.5 ELSE oi.qty END), 0) as used_qty
             FROM daily_quota dq
             LEFT JOIN orders o ON o.pickup_date::text = to_char(dq.date, 'YYYY-MM-DD') AND o.status != 'CANCELLED'
             LEFT JOIN order_items oi ON oi.order_id = o.id
@@ -46,11 +50,13 @@ export const getDailyQuotaByDate = async (date: string) => {
     if (res.rowCount === 0) return null;
 
     const row = res.rows[0];
+    const qty = parseFloat(row.qty);
+    const used_qty = parseFloat(row.used_qty);
     return {
         ...row,
-        qty: parseInt(row.qty, 10),
-        used_qty: parseInt(row.used_qty, 10),
-        remaining_qty: Math.max(0, parseInt(row.qty, 10) - parseInt(row.used_qty, 10))
+        qty,
+        used_qty,
+        remaining_qty: Math.max(0, qty - used_qty)
     };
 };
 

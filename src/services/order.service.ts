@@ -34,7 +34,11 @@ export const createOrder = async (payload: CreateOrderPayload) => {
         if (item.box_type !== 'FULL' && item.box_type !== 'HALF') {
             throw new Error(`box_type harus FULL atau HALF, got: ${item.box_type}`);
         }
-        requestedQty += item.qty;
+        if (item.box_type === 'HALF') {
+            requestedQty += (item.qty * 0.5);
+        } else {
+            requestedQty += item.qty;
+        }
     }
 
     return await transaction(async (client) => {
@@ -51,13 +55,13 @@ export const createOrder = async (payload: CreateOrderPayload) => {
         // Dynamically calculate the currently grouped usage for that date
         // (excluding CANCELLED orders)
         const usedRes = await client.query(`
-            SELECT COALESCE(SUM(oi.qty), 0) as used 
+            SELECT COALESCE(SUM(CASE WHEN oi.box_type = 'HALF' THEN oi.qty * 0.5 ELSE oi.qty END), 0) as used 
             FROM order_items oi 
             JOIN orders o ON oi.order_id = o.id 
             WHERE o.pickup_date = $1 AND o.status != 'CANCELLED'
         `, [pickup_date]);
 
-        const usedQuota = parseInt(usedRes.rows[0].used, 10);
+        const usedQuota = parseFloat(usedRes.rows[0].used);
 
         if (usedQuota + requestedQty > maxQuota) {
             const sisa = Math.max(0, maxQuota - usedQuota);
@@ -76,25 +80,27 @@ export const createOrder = async (payload: CreateOrderPayload) => {
                 FOR UPDATE
             `, [hourStr]);
 
-            if (hourlyRes.rowCount && hourlyRes.rowCount > 0) {
-                const maxHourly = hourlyRes.rows[0].qty;
+            if (!hourlyRes.rowCount || hourlyRes.rowCount === 0) {
+                throw new Error(`MOHON MAAF: Jam pickup ${hourStr} belum dibuka atau sudah ditutup. Silakan pilih jam lain.`);
+            }
 
-                // Dynamically calculate the usage for that exact date AND hour block
-                const usedHourlyRes = await client.query(`
-                    SELECT COALESCE(SUM(oi.qty), 0) as used 
-                    FROM order_items oi 
-                    JOIN orders o ON oi.order_id = o.id 
-                    WHERE o.pickup_date = $1 
-                      AND o.pickup_time LIKE $2
-                      AND o.status != 'CANCELLED'
-                `, [pickup_date, `${pickup_time.split(':')[0]}:%`]);
+            const maxHourly = hourlyRes.rows[0].qty;
 
-                const usedHourly = parseInt(usedHourlyRes.rows[0].used, 10);
+            // Dynamically calculate the usage for that exact date AND hour block
+            const usedHourlyRes = await client.query(`
+                SELECT COALESCE(SUM(CASE WHEN oi.box_type = 'HALF' THEN oi.qty * 0.5 ELSE oi.qty END), 0) as used 
+                FROM order_items oi 
+                JOIN orders o ON oi.order_id = o.id 
+                WHERE o.pickup_date = $1 
+                  AND o.pickup_time LIKE $2
+                  AND o.status != 'CANCELLED'
+            `, [pickup_date, `${pickup_time.split(':')[0]}:%`]);
 
-                if (usedHourly + requestedQty > maxHourly) {
-                    const sisaHour = Math.max(0, maxHourly - usedHourly);
-                    throw new Error(`MOHON MAAF: Kuota Jam ${hourStr} di tanggal ${pickup_date} sudah penuh. (Sisa Jam Ini: ${sisaHour} box). Silakan pilih jam lain.`);
-                }
+            const usedHourly = parseFloat(usedHourlyRes.rows[0].used);
+
+            if (usedHourly + requestedQty > maxHourly) {
+                const sisaHour = Math.max(0, maxHourly - usedHourly);
+                throw new Error(`MOHON MAAF: Kuota Jam ${hourStr} di tanggal ${pickup_date} sudah penuh. (Sisa Jam Ini: ${sisaHour} box). Silakan pilih jam lain.`);
             }
         }
 
