@@ -57,7 +57,7 @@ router.post('/order', orderLimiter, async (req, res) => {
 
                 const totalAmount = pesanan.reduce((sum: number, p: any) => sum + (p.qty * (menuMap.get(p.box_type) || 0)), 0);
 
-                let waMessage = "Hai {{customer_name}}, pesanannya sudah diterima ya.\n\nDetail Pesanan:\n{{order_details}}\n\nJumlah: {{total_box}} box\nTotal: Rp {{total_amount}}\n\nPembayaran bisa melalui:\nBank: BCA\nNo Rek: 1280119748\nA/N: Anggita Prima\n\nMohon konfirmasi bukti pembayarannya melalui link berikut:\n{{upload_link}}\n\nTerima kasih,\nAnggita";
+                let waMessage = "Hai {{customer_name}}, pesanannya sudah diterima ya.\n\nDetail Pesanan:\n{{order_details}}\n\nJumlah: {{total_box}} box\nTotal: Rp {{total_amount}}\n\nPembayaran bisa melalui:\nBank: BCA\nNo Rek: 1280119748\nA/N: Anggita Prima\n\nMohon konfirmasi bukti pembayarannya melalui link berikut:\n{{upload_link}}\n\nTerima kasih,\nRaja Pisang Nugget";
 
                 waMessage = waMessage.replace('{{customer_name}}', customer_name);
                 waMessage = waMessage.replace('{{order_details}}', orderDetails);
@@ -198,7 +198,7 @@ https://maps.app.goo.gl/633auSZ14ucptMDS7
                         waMessage = waMessage.replace('{{schedule_date}}', scheduleDate);
                         waMessage = waMessage.replace('{{pickup_location}}', pickupLocation);
                         waMessage = waMessage.replace('{{pickup_note}}', '*Ambil pesanan Pisang Nugget*\n\nAtas nama ' + targetOrder.customer_name);
-                        waMessage = waMessage.replace('{{sender_name}}', 'Anggita');
+                        waMessage = waMessage.replace('{{sender_name}}', 'Raja Pisang Nugget');
 
                         let waPhone = targetOrder.customer_phone.replace(/[^0-9]/g, '');
                         if (waPhone.startsWith('0')) waPhone = '62' + waPhone.substring(1);
