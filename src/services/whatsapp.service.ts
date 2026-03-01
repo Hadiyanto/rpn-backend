@@ -137,13 +137,15 @@ class WhatsAppService {
         };
     }
 
-    async sendMessage(phone: string, message: string) {
+    async sendMessage(phone: string, message: string, isBroadcast: boolean = false) {
         if (!this.isConnected || !this.sock) {
             throw new Error('WhatsApp not connected');
         }
 
         const currentTask = this.sendingQueue.then(async () => {
-            await this.delay(1500 + Math.random() * 2000); // 1.5 – 3.5 detik random
+            if (isBroadcast) {
+                await this.delay(1500 + Math.random() * 2000); // 1.5 – 3.5 detik random throttle for broadcasts
+            }
 
             // Format phone number (remove +, spaces, etc)
             const formattedPhone = phone.replace(/[^0-9]/g, '');
@@ -172,7 +174,7 @@ class WhatsAppService {
         const results = [];
         for (const phone of phones) {
             try {
-                await this.sendMessage(phone, message);
+                await this.sendMessage(phone, message, true);
                 results.push({ phone, success: true });
             } catch (error: any) {
                 results.push({ phone, success: false, error: error.message });
