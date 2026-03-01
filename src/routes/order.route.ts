@@ -250,6 +250,24 @@ router.patch('/order/:id/transfer-img-url', async (req, res) => {
         }
 
         const data = await updateTransferImgUrl(id, transfer_img_url);
+
+        // Auto-send WhatsApp after successful upload
+        try {
+            const waService = getWhatsAppService();
+            if (waService.isConnected && data && data.customer_phone) {
+                const message = `Hai ${data.customer_name}\nBukti pembayarannya kita validasi dulu ya`;
+
+                let waPhone = data.customer_phone.replace(/[^0-9]/g, '');
+                if (waPhone.startsWith('0')) waPhone = '62' + waPhone.substring(1);
+
+                waService.sendMessage(waPhone, message).catch(err => {
+                    console.error('Auto WA Send Error on Transfer Img Upload:', err);
+                });
+            }
+        } catch (waErr) {
+            console.error('Failed to prepare auto WA message on Transfer Img Upload:', waErr);
+        }
+
         res.json({ status: 'ok', data });
     } catch (e: any) {
         res.status(400).json({ status: 'error', message: e.message });
