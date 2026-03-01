@@ -30,6 +30,12 @@ class WhatsAppService {
 
     async initialize() {
         try {
+            if (this.sock) {
+                // Ensure the exact previous listeners are wiped to prevent memory leaks and zombie connections
+                this.sock.ev.removeAllListeners();
+                this.sock = null;
+            }
+
             const { state, saveCreds, clearState } = await useRedisAuthState(this.sessionName);
             this.clearStateMethod = clearState;
             const { version } = await fetchLatestBaileysVersion();
@@ -51,7 +57,7 @@ class WhatsAppService {
                 }
 
                 if (connection === 'close') {
-                    const statusCode = lastDisconnect?.error?.output?.statusCode;
+                    const statusCode = (lastDisconnect?.error as any)?.output?.payload?.statusCode || (lastDisconnect?.error as any)?.output?.statusCode;
                     const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
 
                     console.log('Connection closed. Status:', statusCode);
@@ -59,8 +65,11 @@ class WhatsAppService {
                     this.isConnected = false;
 
                     if (shouldReconnect) {
-                        console.log('Auto reconnecting in 3 seconds...');
-                        setTimeout(() => this.initialize(), 3000);
+                        // 440 = Conflict (e.g. another session active). Delay much longer to avoid rapid loop spam logs.
+                        const isConflict = statusCode === 440 || statusCode === 409;
+                        const delayTime = isConflict ? 15000 : 3000;
+                        console.log(`Auto reconnecting in ${delayTime / 1000} seconds...`);
+                        setTimeout(() => this.initialize(), delayTime);
                     } else {
                         console.log('Logged out. Clearing Redis session...');
                         if (this.clearStateMethod) {
