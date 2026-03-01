@@ -2,7 +2,7 @@ import { supabase } from '../config/supabase';
 import { transaction } from '../config/db';
 
 export interface OrderItem {
-    box_type: 'FULL' | 'HALF';
+    box_type: 'FULL' | 'HALF' | 'HAMPERS';
     name: string;
     qty: number;
 }
@@ -31,12 +31,13 @@ export const createOrder = async (payload: CreateOrderPayload) => {
 
     let requestedQty = 0;
     for (const item of pesanan) {
-        if (item.box_type !== 'FULL' && item.box_type !== 'HALF') {
-            throw new Error(`box_type harus FULL atau HALF, got: ${item.box_type}`);
+        if (item.box_type !== 'FULL' && item.box_type !== 'HALF' && item.box_type !== 'HAMPERS') {
+            throw new Error(`box_type harus FULL, HALF, atau HAMPERS, got: ${item.box_type}`);
         }
         if (item.box_type === 'HALF') {
             requestedQty += (item.qty * 0.5);
         } else {
+            // FULL and HAMPERS cost 1 quota unit
             requestedQty += item.qty;
         }
     }
