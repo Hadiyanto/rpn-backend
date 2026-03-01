@@ -18,7 +18,12 @@ app.set('trust proxy', 1);
 
 const limiter = rateLimit({
     windowMs: 60 * 1000,
-    max: 10
+    max: 10,
+    skip: (req) => {
+        // Skip rate limiting for endpoints that require frequent polling
+        const path = req.path;
+        return path === '/api/whatsapp/qr' || path === '/api/whatsapp/status';
+    }
 });
 
 app.use(limiter);
