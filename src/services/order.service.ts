@@ -29,44 +29,55 @@ export const createOrder = async (payload: CreateOrderPayload) => {
         throw new Error('pesanan tidak boleh kosong');
     }
 
-    let requestedQty = 0;
+    let requestedBoxQty = 0;
+    let requestedHampersQty = 0;
     for (const item of pesanan) {
         if (item.box_type !== 'FULL' && item.box_type !== 'HALF' && item.box_type !== 'HAMPERS') {
             throw new Error(`box_type harus FULL, HALF, atau HAMPERS, got: ${item.box_type}`);
         }
         if (item.box_type === 'HALF') {
-            requestedQty += (item.qty * 0.5);
-        } else {
-            // FULL and HAMPERS cost 1 quota unit
-            requestedQty += item.qty;
+            requestedBoxQty += (item.qty * 0.5);
+        } else if (item.box_type === 'FULL') {
+            requestedBoxQty += item.qty;
+        } else if (item.box_type === 'HAMPERS') {
+            requestedHampersQty += item.qty;
         }
     }
 
     return await transaction(async (client) => {
         // --- 1. DAILY QUOTA VALIDATION ---
         // Lock quota row for today to prevent race conditions
-        const quotaRes = await client.query('SELECT qty FROM daily_quota WHERE date = $1 FOR UPDATE', [pickup_date]);
+        const quotaRes = await client.query('SELECT qty, hampers_qty FROM daily_quota WHERE date = $1 FOR UPDATE', [pickup_date]);
 
         // If quota isn't defined for this date, assume it's closed/full
         if (quotaRes.rowCount === 0) {
             throw new Error(`MOHON MAAF: Penjualan untuk tanggal ${pickup_date} belum dibuka / kuota belum diatur.`);
         }
         const maxQuota = quotaRes.rows[0].qty;
+        const maxHampersQuota = quotaRes.rows[0].hampers_qty || 0;
 
         // Dynamically calculate the currently grouped usage for that date
         // (excluding CANCELLED orders)
         const usedRes = await client.query(`
-            SELECT COALESCE(SUM(CASE WHEN oi.box_type = 'HALF' THEN oi.qty * 0.5 ELSE oi.qty END), 0) as used 
+            SELECT 
+                COALESCE(SUM(CASE WHEN oi.box_type = 'HALF' THEN oi.qty * 0.5 WHEN oi.box_type = 'FULL' THEN oi.qty ELSE 0 END), 0) as used_box,
+                COALESCE(SUM(CASE WHEN oi.box_type = 'HAMPERS' THEN oi.qty ELSE 0 END), 0) as used_hampers
             FROM order_items oi 
             JOIN orders o ON oi.order_id = o.id 
             WHERE o.pickup_date = $1 AND o.status != 'CANCELLED'
         `, [pickup_date]);
 
-        const usedQuota = parseFloat(usedRes.rows[0].used);
+        const usedBox = parseFloat(usedRes.rows[0].used_box);
+        const usedHampers = parseFloat(usedRes.rows[0].used_hampers);
 
-        if (usedQuota + requestedQty > maxQuota) {
-            const sisa = Math.max(0, maxQuota - usedQuota);
-            throw new Error(`MOHON MAAF: Kuota Total untuk tanggal ${pickup_date} sudah penuh. (Sisa: ${sisa} box)`);
+        if (usedBox + requestedBoxQty > maxQuota) {
+            const sisa = Math.max(0, maxQuota - usedBox);
+            throw new Error(`MOHON MAAF: Kuota Box untuk tanggal ${pickup_date} sudah penuh. (Sisa: ${sisa} box)`);
+        }
+
+        if (usedHampers + requestedHampersQty > maxHampersQuota) {
+            const sisa = Math.max(0, maxHampersQuota - usedHampers);
+            throw new Error(`MOHON MAAF: Kuota Hampers untuk tanggal ${pickup_date} sudah penuh. (Sisa: ${sisa} hampers)`);
         }
 
         // --- 2. HOURLY QUOTA VALIDATION ---
@@ -75,7 +86,7 @@ export const createOrder = async (payload: CreateOrderPayload) => {
 
             // Lock hourly quota row
             const hourlyRes = await client.query(`
-                SELECT qty 
+                SELECT qty, hampers_qty 
                 FROM hourly_quota 
                 WHERE time_str = $1 AND is_active = true 
                 FOR UPDATE
@@ -86,10 +97,13 @@ export const createOrder = async (payload: CreateOrderPayload) => {
             }
 
             const maxHourly = hourlyRes.rows[0].qty;
+            const maxHourlyHampers = hourlyRes.rows[0].hampers_qty || 0;
 
             // Dynamically calculate the usage for that exact date AND hour block
             const usedHourlyRes = await client.query(`
-                SELECT COALESCE(SUM(CASE WHEN oi.box_type = 'HALF' THEN oi.qty * 0.5 ELSE oi.qty END), 0) as used 
+                SELECT 
+                    COALESCE(SUM(CASE WHEN oi.box_type = 'HALF' THEN oi.qty * 0.5 WHEN oi.box_type = 'FULL' THEN oi.qty ELSE 0 END), 0) as used_box,
+                    COALESCE(SUM(CASE WHEN oi.box_type = 'HAMPERS' THEN oi.qty ELSE 0 END), 0) as used_hampers
                 FROM order_items oi 
                 JOIN orders o ON oi.order_id = o.id 
                 WHERE o.pickup_date = $1 
@@ -97,11 +111,17 @@ export const createOrder = async (payload: CreateOrderPayload) => {
                   AND o.status != 'CANCELLED'
             `, [pickup_date, `${pickup_time.split(':')[0]}:%`]);
 
-            const usedHourly = parseFloat(usedHourlyRes.rows[0].used);
+            const usedHourlyBox = parseFloat(usedHourlyRes.rows[0].used_box);
+            const usedHourlyHampers = parseFloat(usedHourlyRes.rows[0].used_hampers);
 
-            if (usedHourly + requestedQty > maxHourly) {
-                const sisaHour = Math.max(0, maxHourly - usedHourly);
+            if (usedHourlyBox + requestedBoxQty > maxHourly) {
+                const sisaHour = Math.max(0, maxHourly - usedHourlyBox);
                 throw new Error(`MOHON MAAF: Kuota Jam ${hourStr} di tanggal ${pickup_date} sudah penuh. (Sisa Jam Ini: ${sisaHour} box). Silakan pilih jam lain.`);
+            }
+
+            if (usedHourlyHampers + requestedHampersQty > maxHourlyHampers) {
+                const sisaHour = Math.max(0, maxHourlyHampers - usedHourlyHampers);
+                throw new Error(`MOHON MAAF: Kuota Jam Hampers ${hourStr} di tanggal ${pickup_date} sudah penuh. (Sisa Jam Ini: ${sisaHour} hampers). Silakan pilih jam lain.`);
             }
         }
 
@@ -252,8 +272,8 @@ export const updateOrder = async (id: number, payload: UpdateOrderPayload) => {
     // 2. Replace items if provided
     if (pesanan && pesanan.length > 0) {
         for (const item of pesanan) {
-            if (item.box_type !== 'FULL' && item.box_type !== 'HALF') {
-                throw new Error(`box_type harus FULL atau HALF, got: ${item.box_type}`);
+            if (item.box_type !== 'FULL' && item.box_type !== 'HALF' && item.box_type !== 'HAMPERS') {
+                throw new Error(`box_type harus FULL, HALF, atau HAMPERS, got: ${item.box_type}`);
             }
         }
 
