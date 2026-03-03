@@ -45,7 +45,7 @@ export const getDailySalaries = async () => {
     return data ?? [];
 };
 
-export const generateDailySalary = async (date: string) => {
+export const calculateSalaryPreview = async (date: string) => {
     // 1. Calculate total boxes sold on that date with status PAID or DONE
     const { data: orders, error: orderErr } = await supabase
         .from('orders')
@@ -75,8 +75,8 @@ export const generateDailySalary = async (date: string) => {
         }
     }
 
-    // Use Math.floor to match the range criteria (e.g. 15.5 falls into 15 or 16? usually we treat 15.5 as 15 for ranges, or whatever user prefers. Let's floor it).
-    const boxCountInt = Math.floor(totalBoxes);
+    // PEMBULATAN KEATAS untuk pencarian range dan kalkulasi nominal
+    const boxCountInt = Math.ceil(totalBoxes);
 
     // 2. Load salary configs
     const configs = await getSalaryConfig();
@@ -92,17 +92,28 @@ export const generateDailySalary = async (date: string) => {
         if (matchingConfig.is_fixed) {
             totalSalary = Number(matchingConfig.amount);
         } else {
-            totalSalary = totalBoxes * Number(matchingConfig.amount); // use exact decimal for calculation
+            totalSalary = boxCountInt * Number(matchingConfig.amount); // Gunakan jumlah yang sudah dibulatkan keatas
         }
     }
+
+    return {
+        date,
+        totalBoxesRaw: totalBoxes,
+        totalBoxesRounded: boxCountInt,
+        totalSalary
+    };
+};
+
+export const generateDailySalary = async (date: string) => {
+    const preview = await calculateSalaryPreview(date);
 
     // 3. Upsert into daily_salary
     const { data: savedSalary, error: saveErr } = await supabase
         .from('daily_salary')
         .upsert({
             date: date,
-            total_boxes: totalBoxes,
-            total_salary: totalSalary,
+            total_boxes: preview.totalBoxesRounded, // Simpan hasil pembulatan ke database
+            total_salary: preview.totalSalary,
             updated_at: new Date().toISOString()
         }, { onConflict: 'date' })
         .select()
