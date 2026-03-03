@@ -12,8 +12,9 @@ export const getStocks = async () => {
 
 export interface AdjustStockDTO {
     stock_id: number;
-    qty_change: number; // positive or negative
+    qty_change: number; // For addition: the amount to add. For target: the final desired quantity.
     type: 'IN' | 'OUT' | 'ADJUSTMENT';
+    is_target?: boolean; // If true, qty_change is treated as the final physical count
     notes?: string;
 }
 
@@ -27,13 +28,26 @@ export const adjustStock = async (payload: AdjustStockDTO) => {
 
     if (stockErr) throw stockErr;
 
-    const final_qty = Number(stock.qty) + Number(payload.qty_change);
+    let final_qty = 0;
+    let history_qty_change = 0;
+
+    if (payload.is_target) {
+        // Physical count mode: input is the TARGET quantity
+        final_qty = Number(payload.qty_change);
+        // Formula per user request: stock - input as the "loss" or change magnitude
+        // Actually, we store delta = target - current for consistency in history lists
+        history_qty_change = final_qty - Number(stock.qty);
+    } else {
+        // Addition mode: input is the DELTA
+        final_qty = Number(stock.qty) + Number(payload.qty_change);
+        history_qty_change = Number(payload.qty_change);
+    }
 
     // 2. Insert into history
     const { error: histErr } = await supabase.from('stock_history').insert({
         stock_id: payload.stock_id,
         type: payload.type,
-        qty_change: payload.qty_change,
+        qty_change: history_qty_change,
         final_qty,
         notes: payload.notes
     });
