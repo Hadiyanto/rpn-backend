@@ -82,17 +82,19 @@ export const calculateSalaryPreview = async (date: string) => {
     const configs = await getSalaryConfig();
     let totalSalary = 0;
 
-    // Find matching range
-    const matchingConfig = configs.find(c => {
-        if (c.max_box === null) return boxCountInt >= c.min_box;
-        return boxCountInt >= c.min_box && boxCountInt <= c.max_box;
-    });
+    // Progressive calculation
+    for (const config of configs) {
+        if (boxCountInt < config.min_box) continue;
 
-    if (matchingConfig) {
-        if (matchingConfig.is_fixed) {
-            totalSalary = Number(matchingConfig.amount);
-        } else {
-            totalSalary = boxCountInt * Number(matchingConfig.amount); // Gunakan jumlah yang sudah dibulatkan keatas
+        const rangeMax = config.max_box === null ? boxCountInt : config.max_box;
+        const boxesInRange = Math.min(boxCountInt, rangeMax) - config.min_box + 1;
+
+        if (boxesInRange > 0) {
+            if (config.is_fixed) {
+                totalSalary += Number(config.amount);
+            } else {
+                totalSalary += boxesInRange * Number(config.amount);
+            }
         }
     }
 
