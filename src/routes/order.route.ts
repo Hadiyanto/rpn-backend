@@ -162,7 +162,6 @@ router.patch('/order/:id/status', async (req, res) => {
             try {
                 const waService = getWhatsAppService();
                 if (waService.isConnected) {
-                    // Fetch full order to get details (customer name, date, phone)
                     const orderRes = await getOrders();
                     const targetOrder = orderRes.find((o: any) => o.id === id);
 
@@ -171,37 +170,26 @@ router.patch('/order/:id/status', async (req, res) => {
                         const scheduleDateStr = dateObj.toLocaleDateString('id-ID', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric', timeZone: 'Asia/Jakarta' });
                         const scheduleDate = `${scheduleDateStr}${targetOrder.pickup_time ? ' jam ' + targetOrder.pickup_time : ''}`;
 
-                        const pickupLocation = `
-Raja Pisang Nugget Kalibata
-Taman Kanak Kanak Widyastuti
-Jl. Rawajati Timur VIII, Rawajati, Pancoran
-Jakarta Selatan 12750
-
-📍 Google Maps:
-https://maps.app.goo.gl/633auSZ14ucptMDS7
-                        `.trim();
-
-                        let waMessage =
-                            "Hi {{customer_name}}, makasih ya sudah order 🙌🏻\n\n" +
-                            "Pesananmu dengan nomor {{order_number}} akan diproses sesuai jadwal {{schedule_date}} ya.\n\n" +
-                            "Untuk pengambilan bisa via:\n" +
-                            "🛵 GoSend\n" +
-                            "🛵 GrabExpress\n" +
-                            "🛵 Maxim (opsional kalau tersedia di area kamu)\n\n" +
-                            "Silakan atur driver sesuai jadwal di format order ya.\n\n" +
-                            "Atau bisa juga pick up langsung ke:\n" +
-                            "{{pickup_location}}\n\n" +
-                            "*Notes untuk driver:*\n" +
-                            "{{pickup_note}}\n\n" +
-                            "Terima kasih,\n" +
-                            "{{sender_name}}";
-
-                        waMessage = waMessage.replace('{{customer_name}}', targetOrder.customer_name);
-                        waMessage = waMessage.replace('{{order_number}}', `#${targetOrder.id}`);
-                        waMessage = waMessage.replace('{{schedule_date}}', scheduleDate);
-                        waMessage = waMessage.replace('{{pickup_location}}', pickupLocation);
-                        waMessage = waMessage.replace('{{pickup_note}}', '*Ambil pesanan Pisang Nugget*\n\nAtas nama ' + targetOrder.customer_name);
-                        waMessage = waMessage.replace('{{sender_name}}', 'Raja Pisang Nugget');
+                        const waMessage =
+                            `Hi ${targetOrder.customer_name} 🙌🏻\n\n` +
+                            `Pembayaran untuk pesanan *#${targetOrder.id}* sudah kami terima, makasih ya!\n\n` +
+                            `Pesananmu akan kami proses sesuai jadwal *${scheduleDate}*.\n\n` +
+                            `Untuk pengambilan nanti bisa via:\n` +
+                            `🛵 GoSend\n` +
+                            `🛵 GrabExpress\n` +
+                            `🛵 Maxim (opsional kalau tersedia di area kamu)\n\n` +
+                            `Atau pick up langsung ke:\n` +
+                            `Raja Pisang Nugget Kalibata\n` +
+                            `Taman Kanak Kanak Widyastuti\n` +
+                            `Jl. Rawajati Timur VIII, Rawajati, Pancoran\n` +
+                            `Jakarta Selatan 12750\n\n` +
+                            `� Google Maps:\n` +
+                            `https://maps.app.goo.gl/633auSZ14ucptMDS7\n\n` +
+                            `*Notes untuk driver:*\n` +
+                            `*Ambil pesanan Pisang Nugget*\n` +
+                            `Atas nama ${targetOrder.customer_name}\n\n` +
+                            `Nanti kami kabarin lagi kalau sudah siap diambil ya! 😊\n` +
+                            `Raja Pisang Nugget`;
 
                         let waPhone = targetOrder.customer_phone.replace(/[^0-9]/g, '');
                         if (waPhone.startsWith('0')) waPhone = '62' + waPhone.substring(1);
@@ -225,35 +213,11 @@ https://maps.app.goo.gl/633auSZ14ucptMDS7
                     const targetOrder = orderRes.find((o: any) => o.id === id);
 
                     if (targetOrder && targetOrder.customer_phone) {
-                        const dateObj = new Date(`${targetOrder.pickup_date}T00:00:00+07:00`);
-                        const scheduleDateStr = dateObj.toLocaleDateString('id-ID', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric', timeZone: 'Asia/Jakarta' });
-                        const scheduleDate = `${scheduleDateStr}${targetOrder.pickup_time ? ' jam ' + targetOrder.pickup_time : ''}`;
-
-                        let waMessage =
-                            "Hi {{customer_name}}! 🎉\n\n" +
-                            "Pesananmu nomor {{order_number}} sudah *selesai dibuat* dan siap untuk diambil!\n\n" +
-                            "📦 *Detail Pengambilan:*\n" +
-                            "Jadwal: {{schedule_date}}\n\n" +
-                            "Untuk pengambilan bisa via:\n" +
-                            "🛵 GoSend\n" +
-                            "🛵 GrabExpress\n" +
-                            "🛵 Maxim (opsional kalau tersedia di area kamu)\n\n" +
-                            "Atau pick up langsung ke:\n" +
-                            "Raja Pisang Nugget Kalibata\n" +
-                            "Taman Kanak Kanak Widyastuti\n" +
-                            "Jl. Rawajati Timur VIII, Rawajati, Pancoran\n" +
-                            "Jakarta Selatan 12750\n\n" +
-                            "📍 Google Maps:\n" +
-                            "https://maps.app.goo.gl/633auSZ14ucptMDS7\n\n" +
-                            "*Notes untuk driver:*\n" +
-                            "*Ambil pesanan Pisang Nugget*\n" +
-                            "Atas nama {{customer_name}}\n\n" +
-                            "Terima kasih sudah order, semoga suka! 🍌\n" +
-                            "Raja Pisang Nugget";
-
-                        waMessage = waMessage.replace(/{{customer_name}}/g, targetOrder.customer_name);
-                        waMessage = waMessage.replace('{{order_number}}', `#${targetOrder.id}`);
-                        waMessage = waMessage.replace('{{schedule_date}}', scheduleDate);
+                        const waMessage =
+                            `Hi ${targetOrder.customer_name}! 🎉\n\n` +
+                            `Pesanan *#${targetOrder.id}* kamu sudah selesai dibuat dan *siap diambil sekarang*!\n\n` +
+                            `Silakan atur pickup ya. Terima kasih sudah order! 🍌\n` +
+                            `Raja Pisang Nugget`;
 
                         let waPhone = targetOrder.customer_phone.replace(/[^0-9]/g, '');
                         if (waPhone.startsWith('0')) waPhone = '62' + waPhone.substring(1);
