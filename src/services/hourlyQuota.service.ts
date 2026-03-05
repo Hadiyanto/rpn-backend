@@ -1,4 +1,4 @@
-import { transaction } from '../config/db';
+import { pool, transaction } from '../config/db';
 
 export interface HourlyQuota {
     id: number;
@@ -9,13 +9,11 @@ export interface HourlyQuota {
 }
 
 export const getHourlyQuotas = async (): Promise<HourlyQuota[]> => {
-    const res = await transaction(async (client) => {
-        return client.query(`
-            SELECT id, time_str, qty, hampers_qty, is_active
-            FROM hourly_quota
-            ORDER BY time_str ASC
-        `);
-    });
+    const res = await pool.query(`
+        SELECT id, time_str, qty, hampers_qty, is_active
+        FROM hourly_quota
+        ORDER BY time_str ASC
+    `);
 
     return res.rows.map(row => ({
         ...row,
@@ -26,23 +24,21 @@ export const getHourlyQuotas = async (): Promise<HourlyQuota[]> => {
 };
 
 export const getHourlyAvailability = async (date: string): Promise<(HourlyQuota & { used_qty: number, remaining_qty: number, used_hampers_qty: number, remaining_hampers_qty: number })[]> => {
-    const res = await transaction(async (client) => {
-        return client.query(`
-            SELECT 
-                hq.id, 
-                hq.time_str, 
-                hq.qty, 
-                hq.hampers_qty,
-                hq.is_active,
-                COALESCE(SUM(CASE WHEN oi.box_type = 'HALF' THEN oi.qty * 0.5 WHEN oi.box_type = 'FULL' THEN oi.qty ELSE 0 END), 0) as used_qty,
-                COALESCE(SUM(CASE WHEN oi.box_type = 'HAMPERS' THEN oi.qty ELSE 0 END), 0) as used_hampers_qty
-            FROM hourly_quota hq
-            LEFT JOIN orders o ON o.pickup_date = $1 AND o.pickup_time LIKE (substring(hq.time_str, 1, 2) || '%') AND o.status != 'CANCELLED'
-            LEFT JOIN order_items oi ON oi.order_id = o.id
-            GROUP BY hq.id, hq.time_str, hq.qty, hq.hampers_qty, hq.is_active
-            ORDER BY hq.time_str ASC
-        `, [date]);
-    });
+    const res = await pool.query(`
+        SELECT 
+            hq.id, 
+            hq.time_str, 
+            hq.qty, 
+            hq.hampers_qty,
+            hq.is_active,
+            COALESCE(SUM(CASE WHEN oi.box_type = 'HALF' THEN oi.qty * 0.5 WHEN oi.box_type = 'FULL' THEN oi.qty ELSE 0 END), 0) as used_qty,
+            COALESCE(SUM(CASE WHEN oi.box_type = 'HAMPERS' THEN oi.qty ELSE 0 END), 0) as used_hampers_qty
+        FROM hourly_quota hq
+        LEFT JOIN orders o ON o.pickup_date = $1 AND o.pickup_time LIKE (substring(hq.time_str, 1, 2) || '%') AND o.status != 'CANCELLED'
+        LEFT JOIN order_items oi ON oi.order_id = o.id
+        GROUP BY hq.id, hq.time_str, hq.qty, hq.hampers_qty, hq.is_active
+        ORDER BY hq.time_str ASC
+    `, [date]);
 
     return res.rows.map(row => {
         const qty = parseFloat(row.qty);
@@ -62,6 +58,7 @@ export const getHourlyAvailability = async (date: string): Promise<(HourlyQuota 
     });
 };
 
+// Write operations still use transaction for data integrity
 export const upsertHourlyQuota = async (time_str: string, qty: number, hampers_qty: number = 0, is_active: boolean = true) => {
     const res = await transaction(async (client) => {
         return client.query(`
