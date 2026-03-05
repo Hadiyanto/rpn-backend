@@ -3,6 +3,9 @@ import rateLimit from 'express-rate-limit';
 import { createOrder, getOrders, getOrderById, updateOrderStatus, updatePaymentMethod, updateOrder, updateTransferImgUrl } from '../services/order.service';
 import { sendPushToAll } from '../services/push.service';
 import { getWhatsAppService } from '../services/whatsapp.service';
+import { formatWAPhone } from '../utils/phone';
+import { buildNewOrderMessage, buildPaidOrderMessage, buildDoneOrderMessage, buildTransferReceivedMessage } from '../utils/waMessages';
+import { pool } from '../config/db';
 
 const router = Router();
 
@@ -14,29 +17,34 @@ const orderLimiter = rateLimit({
         status: 'error',
         message: 'Anda sudah membuat terlalu banyak pesanan hari ini. Silakan coba lagi nanti.'
     },
-    standardHeaders: true, // Return rate limit info in the `RateLimit-*` headers
-    legacyHeaders: false, // Disable the `X-RateLimit-*` headers
+    standardHeaders: true,
+    legacyHeaders: false,
 });
 
 router.post('/order', orderLimiter, async (req, res) => {
     try {
-        const { customer_name, customer_phone, pesanan, pickup_date, pickup_time, note, payment_method, delivery_method, delivery_lat, delivery_lng, delivery_address, delivery_driver_note, delivery_area_id } = req.body;
+        const {
+            customer_name, customer_phone, pesanan, pickup_date, pickup_time,
+            note, payment_method,
+            delivery_method, delivery_lat, delivery_lng, delivery_address, delivery_driver_note, delivery_area_id
+        } = req.body;
 
         if (!customer_name || !customer_phone || !pesanan || !pickup_date) {
             res.status(400).json({ status: 'error', message: 'customer_name, customer_phone, pesanan, dan pickup_date wajib diisi' });
             return;
         }
 
-        const data = await createOrder({ customer_name, customer_phone, pesanan, pickup_date, pickup_time, note, payment_method, delivery_method, delivery_lat, delivery_lng, delivery_address, delivery_driver_note, delivery_area_id });
+        const data = await createOrder({
+            customer_name, customer_phone, pesanan, pickup_date, pickup_time, note, payment_method,
+            delivery_method, delivery_lat, delivery_lng, delivery_address, delivery_driver_note, delivery_area_id
+        });
 
         // Fire-and-forget push notification
         let scheduleDateStr = pickup_date;
         try {
             const dateObj = new Date(`${pickup_date}T00:00:00+07:00`);
             scheduleDateStr = dateObj.toLocaleDateString('id-ID', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric', timeZone: 'Asia/Jakarta' });
-        } catch (e) {
-            // fallback to raw string
-        }
+        } catch (_) { /* fallback to raw string */ }
 
         sendPushToAll({
             title: '🛍️ Order Baru Masuk!',
@@ -48,36 +56,24 @@ router.post('/order', orderLimiter, async (req, res) => {
         try {
             const waService = getWhatsAppService();
             if (waService.isConnected) {
-                const orderDetails = pesanan.map((p: any) => `- ${p.qty}x ${p.box_type === 'FULL' ? 'Full Box' : 'Half Box'} (${p.name})`).join('\n');
+                const orderDetails = pesanan.map((p: any) => `- ${p.qty}x ${p.box_type === 'FULL' ? 'Full Box' : p.box_type === 'HALF' ? 'Half Box' : 'Hampers'} (${p.name})`).join('\n');
                 const totalBox = pesanan.reduce((sum: number, p: any) => sum + p.qty, 0);
-
-                // Currently backend doesn't fetch menus directly here to calculate totalAmount easily.
-                // It's better to fetch it or rely on the frontend payload. But the user didn't mention sending amount from frontend.
-                // Wait, creating the order doesn't calculate amount either. Let's just use the template provided by the user.
-
                 const uploadLink = `${process.env.FRONTEND_URL || 'http://localhost:3001'}/bukti-transfer/${data.id}`;
-                // The provided template from user:
-                // "Hai {{customer_name}}, pesanannya sudah diterima ya.\n\nDetail Pesanan:\n{{order_details}}\n\nJumlah: {{total_box}} box\nTotal: Rp {{total_amount}}\n\nPembayaran bisa melalui:\nBank: BCA\nNo Rek: 123456789\nA/N: Anggita Prima\n\nMohon konfirmasi bukti pembayarannya melalui link berikut:\n{{upload_link}}\n\nTerima kasih,\nAnggita"
 
-                // Since we need total_amount, we need to quickly query the menus
-                const { rows: menuRows } = await import('../config/db').then(m => m.pool.query('SELECT name, price FROM menu'));
+                const { rows: menuRows } = await pool.query('SELECT name, price FROM menu');
                 const menuMap = new Map<string, number>(menuRows.map((r: any) => [r.name, Number(r.price)]));
-
                 const totalAmount = pesanan.reduce((sum: number, p: any) => sum + (p.qty * (menuMap.get(p.box_type) || 0)), 0);
 
-                let waMessage = "Hai {{customer_name}}, pesanannya sudah diterima ya.\n\nDetail Pesanan:\n{{order_details}}\n\nJumlah: {{total_box}} box\nTotal: Rp {{total_amount}}\n\nPembayaran bisa melalui:\nBank: BCA\nNo Rek: 1280119748\nA/N: Anggita Prima\n\nMohon konfirmasi bukti pembayarannya melalui link berikut:\n{{upload_link}}\n\nTerima kasih,\nRaja Pisang Nugget";
+                const waMessage = buildNewOrderMessage({
+                    customer_name,
+                    order_id: data.id,
+                    order_details: orderDetails,
+                    total_box: totalBox,
+                    total_amount: totalAmount.toLocaleString('id-ID'),
+                    upload_link: uploadLink,
+                });
 
-                waMessage = waMessage.replace('{{customer_name}}', customer_name);
-                waMessage = waMessage.replace('{{order_details}}', orderDetails);
-                waMessage = waMessage.replace('{{total_box}}', String(totalBox));
-                waMessage = waMessage.replace('{{total_amount}}', totalAmount.toLocaleString('id-ID'));
-                waMessage = waMessage.replace('{{upload_link}}', uploadLink);
-
-                // Re-format phone (just in case frontend didn't do it)
-                let waPhone = customer_phone.replace(/[^0-9]/g, '');
-                if (waPhone.startsWith('0')) waPhone = '62' + waPhone.substring(1);
-
-                waService.sendMessage(waPhone, waMessage).catch(err => {
+                waService.sendMessage(formatWAPhone(customer_phone), waMessage).catch(err => {
                     console.error('Auto WA Send Error:', err);
                 });
             }
@@ -88,7 +84,7 @@ router.post('/order', orderLimiter, async (req, res) => {
         res.json({ status: 'ok', data });
     } catch (e: any) {
         console.error('Error creating order:', e);
-        res.status(500).json({ status: 'error', message: e?.message || String(e), detail: e });
+        res.status(500).json({ status: 'error', message: e?.message || String(e) });
     }
 });
 
@@ -162,39 +158,21 @@ router.patch('/order/:id/status', async (req, res) => {
             try {
                 const waService = getWhatsAppService();
                 if (waService.isConnected) {
-                    const orderRes = await getOrders();
-                    const targetOrder = orderRes.find((o: any) => o.id === id);
+                    // FIX: Use getOrderById instead of loading all orders
+                    const targetOrder = await getOrderById(id);
 
                     if (targetOrder && targetOrder.customer_phone) {
                         const dateObj = new Date(`${targetOrder.pickup_date}T00:00:00+07:00`);
                         const scheduleDateStr = dateObj.toLocaleDateString('id-ID', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric', timeZone: 'Asia/Jakarta' });
                         const scheduleDate = `${scheduleDateStr}${targetOrder.pickup_time ? ' jam ' + targetOrder.pickup_time : ''}`;
 
-                        const waMessage =
-                            `Hi ${targetOrder.customer_name} 🙌🏻\n\n` +
-                            `Pembayaran untuk pesanan *#${targetOrder.id}* sudah kami terima, makasih ya!\n\n` +
-                            `Pesananmu akan kami proses sesuai jadwal *${scheduleDate}*.\n\n` +
-                            `Untuk pengambilan nanti bisa via:\n` +
-                            `🛵 GoSend\n` +
-                            `🛵 GrabExpress\n` +
-                            `🛵 Maxim (opsional kalau tersedia di area kamu)\n\n` +
-                            `Atau pick up langsung ke:\n` +
-                            `Raja Pisang Nugget Kalibata\n` +
-                            `Taman Kanak Kanak Widyastuti\n` +
-                            `Jl. Rawajati Timur VIII, Rawajati, Pancoran\n` +
-                            `Jakarta Selatan 12750\n\n` +
-                            `� Google Maps:\n` +
-                            `https://maps.app.goo.gl/633auSZ14ucptMDS7\n\n` +
-                            `*Notes untuk driver:*\n` +
-                            `*Ambil pesanan Pisang Nugget*\n` +
-                            `Atas nama ${targetOrder.customer_name}\n\n` +
-                            `Nanti kami kabarin lagi kalau sudah siap diambil ya! 😊\n` +
-                            `Raja Pisang Nugget`;
+                        const waMessage = buildPaidOrderMessage({
+                            customer_name: targetOrder.customer_name,
+                            order_id: targetOrder.id,
+                            scheduleDate,
+                        });
 
-                        let waPhone = targetOrder.customer_phone.replace(/[^0-9]/g, '');
-                        if (waPhone.startsWith('0')) waPhone = '62' + waPhone.substring(1);
-
-                        waService.sendMessage(waPhone, waMessage).catch(err => {
+                        waService.sendMessage(formatWAPhone(targetOrder.customer_phone), waMessage).catch(err => {
                             console.error('Auto WA Send Error on PAID:', err);
                         });
                     }
@@ -209,20 +187,16 @@ router.patch('/order/:id/status', async (req, res) => {
             try {
                 const waService = getWhatsAppService();
                 if (waService.isConnected) {
-                    const orderRes = await getOrders();
-                    const targetOrder = orderRes.find((o: any) => o.id === id);
+                    // FIX: Use getOrderById instead of loading all orders
+                    const targetOrder = await getOrderById(id);
 
                     if (targetOrder && targetOrder.customer_phone) {
-                        const waMessage =
-                            `Hi ${targetOrder.customer_name}! 🎉\n\n` +
-                            `Pesanan *#${targetOrder.id}* kamu sudah selesai dibuat dan *siap diambil sekarang*!\n\n` +
-                            `Silakan atur pickup ya. Terima kasih sudah order! 🍌\n` +
-                            `Raja Pisang Nugget`;
+                        const waMessage = buildDoneOrderMessage({
+                            customer_name: targetOrder.customer_name,
+                            order_id: targetOrder.id,
+                        });
 
-                        let waPhone = targetOrder.customer_phone.replace(/[^0-9]/g, '');
-                        if (waPhone.startsWith('0')) waPhone = '62' + waPhone.substring(1);
-
-                        waService.sendMessage(waPhone, waMessage).catch(err => {
+                        waService.sendMessage(formatWAPhone(targetOrder.customer_phone), waMessage).catch(err => {
                             console.error('Auto WA Send Error on DONE:', err);
                         });
                     }
@@ -274,12 +248,8 @@ router.patch('/order/:id/transfer-img-url', async (req, res) => {
         try {
             const waService = getWhatsAppService();
             if (waService.isConnected && data && data.customer_phone) {
-                const message = `Hai ${data.customer_name}\nBukti pembayarannya kita validasi dulu ya`;
-
-                let waPhone = data.customer_phone.replace(/[^0-9]/g, '');
-                if (waPhone.startsWith('0')) waPhone = '62' + waPhone.substring(1);
-
-                waService.sendMessage(waPhone, message).catch(err => {
+                const waMessage = buildTransferReceivedMessage(data.customer_name);
+                waService.sendMessage(formatWAPhone(data.customer_phone), waMessage).catch(err => {
                     console.error('Auto WA Send Error on Transfer Img Upload:', err);
                 });
             }
@@ -294,4 +264,3 @@ router.patch('/order/:id/transfer-img-url', async (req, res) => {
 });
 
 export default router;
-

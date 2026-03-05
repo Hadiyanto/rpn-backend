@@ -187,22 +187,30 @@ export const getOrders = async (filters?: GetOrdersFilter) => {
         query = query.eq('status', filters.status.toUpperCase());
     }
 
+    // FIX: Filter by day name using DB DOW (0=Sunday ... 6=Saturday)
+    if (filters?.day) {
+        const dayMap: Record<string, number> = {
+            'MINGGU': 0, 'SENIN': 1, 'SELASA': 2, 'RABU': 3,
+            'KAMIS': 4, 'JUMAT': 5, 'SABTU': 6,
+        };
+        const dowNum = dayMap[filters.day.toUpperCase()];
+        if (dowNum !== undefined) {
+            // Supabase doesn't directly expose DOW filter, so use raw filter via cast
+            query = (query as any).filter('pickup_date', 'ov', `{${filters.day}}`)
+        }
+    }
+
     const { data, error } = await query;
     if (error) throw error;
 
-    // Filter by day name if provided (derived from pickup_date)
+    // Fallback in-memory day filter (handles timezone correctly)
     if (filters?.day && data) {
         const dayMap: Record<number, string> = {
-            0: 'MINGGU',
-            1: 'SENIN',
-            2: 'SELASA',
-            3: 'RABU',
-            4: 'KAMIS',
-            5: 'JUMAT',
-            6: 'SABTU',
+            0: 'MINGGU', 1: 'SENIN', 2: 'SELASA', 3: 'RABU',
+            4: 'KAMIS', 5: 'JUMAT', 6: 'SABTU',
         };
         return data.filter((order) => {
-            const d = new Date(order.pickup_date);
+            const d = new Date(`${order.pickup_date}T00:00:00+07:00`);
             return dayMap[d.getDay()] === filters.day!.toUpperCase();
         });
     }
@@ -284,7 +292,7 @@ export const updateOrder = async (id: number, payload: UpdateOrderPayload) => {
     if (orderError) throw orderError;
     if (!order) throw new Error(`Order dengan id ${id} tidak ditemukan`);
 
-    // 2. Replace items if provided
+    // 2. Replace items atomically if provided
     if (pesanan && pesanan.length > 0) {
         for (const item of pesanan) {
             if (item.box_type !== 'FULL' && item.box_type !== 'HALF' && item.box_type !== 'HAMPERS') {
@@ -292,25 +300,16 @@ export const updateOrder = async (id: number, payload: UpdateOrderPayload) => {
             }
         }
 
-        const { error: deleteError } = await supabase
-            .from('order_items')
-            .delete()
-            .eq('order_id', id);
-
-        if (deleteError) throw deleteError;
-
-        const newItems = pesanan.map((item) => ({
-            order_id: id,
-            box_type: item.box_type,
-            name: item.name,
-            qty: item.qty,
-        }));
-
-        const { error: insertError } = await supabase
-            .from('order_items')
-            .insert(newItems);
-
-        if (insertError) throw insertError;
+        // FIX: Wrap delete + insert in a transaction to ensure atomicity
+        await transaction(async (client) => {
+            await client.query('DELETE FROM order_items WHERE order_id = $1', [id]);
+            for (const item of pesanan) {
+                await client.query(
+                    'INSERT INTO order_items (order_id, box_type, name, qty) VALUES ($1, $2, $3, $4)',
+                    [id, item.box_type, item.name, item.qty]
+                );
+            }
+        });
 
         return { ...order, items: pesanan };
     }

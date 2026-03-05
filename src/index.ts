@@ -18,11 +18,17 @@ app.set('trust proxy', 1);
 
 const limiter = rateLimit({
     windowMs: 60 * 1000,
-    max: 10,
+    max: 60,
     skip: (req) => {
         // Skip rate limiting for endpoints that require frequent polling or parallel fetching
         const p = req.path;
-        return p.includes('/api/whatsapp/qr') ||
+        return (
+            req.method === 'GET' && (
+                p.includes('/api/orders') ||
+                p.includes('/api/order/')
+            )
+        ) ||
+            p.includes('/api/whatsapp/qr') ||
             p.includes('/api/whatsapp/status') ||
             p.includes('/api/whatsapp/contacts') ||
             p.includes('/api/menu') ||
@@ -35,7 +41,9 @@ const limiter = rateLimit({
 app.use(limiter);
 
 app.use(cors({
-    origin: ["http://localhost:3000", "http://192.168.18.52:3000", "https://rpn-frontend-omega.vercel.app"],
+    origin: (process.env.CORS_ORIGINS || 'http://localhost:3000')
+        .split(',')
+        .map(o => o.trim()),
     methods: ["GET", "POST", "PUT", "PATCH", "DELETE"],
     credentials: true,
 }));
