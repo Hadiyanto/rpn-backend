@@ -46,7 +46,7 @@ router.post('/biteship/rates', async (req, res) => {
         const {
             destination_latitude,
             destination_longitude,
-            couriers = 'gosend,grab_express,gojek,jne,sicepat,jnt,anteraja,ide',
+            couriers = 'gosend,grab,gojek,jne,sicepat,jnt,anteraja,ide',
             items,
         } = req.body;
 
@@ -88,7 +88,9 @@ router.post('/biteship/rates', async (req, res) => {
  *   destination_area_id, courier_company, courier_type, items
  *
  * Optional:
- *   delivery_type (default: 'now'), destination_coordinate { latitude, longitude },
+ *   delivery_type (default: 'now', set to 'scheduled' for scheduled delivery),
+ *   delivery_date ('YYYY-MM-DD'), delivery_time ('HH:mm'),
+ *   destination_coordinate { latitude, longitude },
  *   destination_note, order_note, notes
  */
 router.post('/biteship/order', async (req, res) => {
@@ -103,6 +105,8 @@ router.post('/biteship/order', async (req, res) => {
             courier_company,
             courier_type,
             delivery_type = 'now',
+            delivery_date,
+            delivery_time,
             order_note,
             items,
         } = req.body;
@@ -144,6 +148,8 @@ router.post('/biteship/order', async (req, res) => {
             // Items
             items,
             // Optionals
+            ...(delivery_date ? { delivery_date } : {}),
+            ...(delivery_time ? { delivery_time } : {}),
             ...(destination_note ? { destination_note } : {}),
             ...(destination_coordinate ? { destination_coordinate } : {}),
             ...(order_note ? { order_note } : {}),

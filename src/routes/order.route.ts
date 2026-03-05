@@ -20,14 +20,14 @@ const orderLimiter = rateLimit({
 
 router.post('/order', orderLimiter, async (req, res) => {
     try {
-        const { customer_name, customer_phone, pesanan, pickup_date, pickup_time, note, payment_method } = req.body;
+        const { customer_name, customer_phone, pesanan, pickup_date, pickup_time, note, payment_method, delivery_method, delivery_lat, delivery_lng, delivery_address, delivery_driver_note, delivery_area_id } = req.body;
 
         if (!customer_name || !customer_phone || !pesanan || !pickup_date) {
             res.status(400).json({ status: 'error', message: 'customer_name, customer_phone, pesanan, dan pickup_date wajib diisi' });
             return;
         }
 
-        const data = await createOrder({ customer_name, customer_phone, pesanan, pickup_date, pickup_time, note, payment_method });
+        const data = await createOrder({ customer_name, customer_phone, pesanan, pickup_date, pickup_time, note, payment_method, delivery_method, delivery_lat, delivery_lng, delivery_address, delivery_driver_note, delivery_area_id });
 
         // Fire-and-forget push notification
         let scheduleDateStr = pickup_date;

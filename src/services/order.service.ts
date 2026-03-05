@@ -15,6 +15,12 @@ export interface CreateOrderPayload {
     pickup_time?: string;
     note?: string;
     payment_method?: string | null;
+    delivery_method?: string;
+    delivery_lat?: number | null;
+    delivery_lng?: number | null;
+    delivery_address?: string | null;
+    delivery_driver_note?: string | null;
+    delivery_area_id?: string | null;
 }
 
 export interface GetOrdersFilter {
@@ -23,7 +29,7 @@ export interface GetOrdersFilter {
 }
 
 export const createOrder = async (payload: CreateOrderPayload) => {
-    const { customer_name, customer_phone, pesanan, pickup_date, pickup_time, note, payment_method } = payload;
+    const { customer_name, customer_phone, pesanan, pickup_date, pickup_time, note, payment_method, delivery_method, delivery_lat, delivery_lng, delivery_address, delivery_driver_note, delivery_area_id } = payload;
 
     if (!pesanan || pesanan.length === 0) {
         throw new Error('pesanan tidak boleh kosong');
@@ -127,8 +133,11 @@ export const createOrder = async (payload: CreateOrderPayload) => {
 
         // --- 3. INSERT ORDER ---
         const orderRes = await client.query(`
-            INSERT INTO orders (customer_name, customer_phone, pickup_date, pickup_time, note, status, payment_method) 
-            VALUES ($1, $2, $3, $4, $5, $6, $7) 
+            INSERT INTO orders (
+                customer_name, customer_phone, pickup_date, pickup_time, note, status, payment_method,
+                delivery_method, delivery_lat, delivery_lng, delivery_address, delivery_driver_note, delivery_area_id
+            ) 
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13) 
             RETURNING *
         `, [
             customer_name,
@@ -137,7 +146,13 @@ export const createOrder = async (payload: CreateOrderPayload) => {
             pickup_time ?? '11:00 - 16:00',
             note ?? null,
             'UNPAID',
-            payment_method ?? null
+            payment_method ?? null,
+            delivery_method ?? 'pickup',
+            delivery_lat ?? null,
+            delivery_lng ?? null,
+            delivery_address ?? null,
+            delivery_driver_note ?? null,
+            delivery_area_id ?? null,
         ]);
 
         const order = orderRes.rows[0];
