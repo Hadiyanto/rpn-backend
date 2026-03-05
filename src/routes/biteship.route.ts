@@ -3,6 +3,19 @@ import { biteshipGet, biteshipPost } from '../utils/biteship';
 
 const router = Router();
 
+/** RPN Store — origin constant for all Biteship shipments */
+const RPN_ORIGIN = {
+    contact_name: 'RPN Store',
+    contact_phone: '081314220599',
+    address: 'Belakang TK Widiastuti, Jalan Rawa Jati Timur VIII, RW 08, Rawajati, Pancoran, Jakarta Selatan, DKI Jakarta 12750',
+    area_id: 'IDNP6IDNC148IDND841IDZ12750',
+    postal_code: 12750,
+    coordinate: {
+        latitude: -6.261204,
+        longitude: 106.854106,
+    },
+} as const;
+
 /**
  * GET /api/biteship/areas?search=jakarta+selatan
  * Search Biteship area by keyword.
@@ -24,70 +37,36 @@ router.get('/biteship/areas', async (req, res) => {
 
 /**
  * POST /api/biteship/rates
- * Get shipping rates. Auto-detects mode from body fields:
- *
- * Mode 1 — By Coordinates (Low accuracy, supports instant: Gojek, Grab, Paxel etc.)
- *   Body: { origin_latitude, origin_longitude, destination_latitude, destination_longitude, couriers, items }
- *
- * Mode 2 — By Postal Code (Medium accuracy, no instant)
- *   Body: { origin_postal_code, destination_postal_code, couriers, items }
- *
- * Mode 3 — By Area ID (High accuracy, no instant)
- *   Body: { origin_area_id, destination_area_id, couriers, items }
- *
- * items: [{ name, value, length, width, height, weight, quantity, description? }]
+ * Get shipping rates. Origin always from RPN_ORIGIN (lat/lng).
+ * FE cukup kirim: { destination_latitude, destination_longitude, couriers?, items }
+ * items: [{ name, value, length, width, height, weight, quantity }]
  */
 router.post('/biteship/rates', async (req, res) => {
     try {
         const {
-            // Mode 1: lat/lng
-            origin_latitude, origin_longitude,
-            destination_latitude, destination_longitude,
-            // Mode 2: postal code
-            origin_postal_code, destination_postal_code,
-            // Mode 3: area ID
-            origin_area_id, destination_area_id,
-            // Common
+            destination_latitude,
+            destination_longitude,
             couriers = 'gosend,grab_express,gojek,jne,sicepat,jnt,anteraja,ide',
             items,
         } = req.body;
 
+        if (!destination_latitude || !destination_longitude) {
+            res.status(400).json({ status: 'error', message: 'destination_latitude dan destination_longitude wajib diisi' });
+            return;
+        }
         if (!items?.length) {
             res.status(400).json({ status: 'error', message: 'Field items wajib diisi' });
             return;
         }
 
-        let ratePayload: Record<string, any> = { couriers, items };
-
-        if (origin_latitude && origin_longitude && destination_latitude && destination_longitude) {
-            // Mode 1 — Coordinates: supports instant couriers (Gojek, Grab, etc)
-            ratePayload = {
-                ...ratePayload,
-                origin_latitude: Number(origin_latitude),
-                origin_longitude: Number(origin_longitude),
-                destination_latitude: Number(destination_latitude),
-                destination_longitude: Number(destination_longitude),
-            };
-        } else if (origin_postal_code && destination_postal_code) {
-            // Mode 2 — Postal code: medium accuracy
-            ratePayload = {
-                ...ratePayload,
-                origin_postal_code: Number(origin_postal_code),
-                destination_postal_code: Number(destination_postal_code),
-            };
-        } else if (origin_area_id && destination_area_id) {
-            // Mode 3 — Area ID: highest accuracy
-            ratePayload = { ...ratePayload, origin_area_id, destination_area_id };
-        } else {
-            res.status(400).json({
-                status: 'error',
-                message: 'Wajib menyertakan salah satu mode: ' +
-                    '(origin/destination_latitude+longitude) | ' +
-                    '(origin/destination_postal_code) | ' +
-                    '(origin/destination_area_id)',
-            });
-            return;
-        }
+        const ratePayload = {
+            origin_latitude: RPN_ORIGIN.coordinate.latitude,
+            origin_longitude: RPN_ORIGIN.coordinate.longitude,
+            destination_latitude: Number(destination_latitude),
+            destination_longitude: Number(destination_longitude),
+            couriers,
+            items,
+        };
 
         const data = await biteshipPost('/rates/couriers', ratePayload);
         res.json({ status: 'ok', data: data.pricing ?? [] });
@@ -96,32 +75,41 @@ router.post('/biteship/rates', async (req, res) => {
     }
 });
 
+
+
+
 /**
  * POST /api/biteship/order
  * Create a Biteship shipment order.
+ * Origin is always RPN store (hardcoded). Only destination + courier details needed from body.
+ *
+ * Required body fields:
+ *   destination_contact_name, destination_contact_phone, destination_address,
+ *   destination_area_id, courier_company, courier_type, items
+ *
+ * Optional:
+ *   delivery_type (default: 'now'), destination_coordinate { latitude, longitude },
+ *   destination_note, order_note, notes
  */
 router.post('/biteship/order', async (req, res) => {
     try {
         const {
-            shipper_contact_name,
-            shipper_contact_phone,
-            origin_contact_name,
-            origin_contact_phone,
-            origin_address,
-            origin_area_id,
             destination_contact_name,
             destination_contact_phone,
             destination_address,
             destination_area_id,
+            destination_note,
+            destination_coordinate,
             courier_company,
             courier_type,
+            delivery_type = 'now',
+            order_note,
             items,
-            notes,
         } = req.body;
 
         const required = [
-            'origin_contact_name', 'origin_contact_phone', 'origin_address', 'origin_area_id',
-            'destination_contact_name', 'destination_contact_phone', 'destination_address', 'destination_area_id',
+            'destination_contact_name', 'destination_contact_phone',
+            'destination_address', 'destination_area_id',
             'courier_company', 'courier_type',
         ];
 
@@ -134,22 +122,31 @@ router.post('/biteship/order', async (req, res) => {
             return;
         }
 
-        const payload = {
-            shipper_contact_name: shipper_contact_name || origin_contact_name,
-            shipper_contact_phone: shipper_contact_phone || origin_contact_phone,
-            origin_contact_name,
-            origin_contact_phone,
-            origin_address,
-            origin_area_id,
+        const payload: Record<string, any> = {
+            // Shipper = toko
+            shipper_contact_name: RPN_ORIGIN.contact_name,
+            shipper_contact_phone: RPN_ORIGIN.contact_phone,
+            // Origin = toko
+            origin_contact_name: RPN_ORIGIN.contact_name,
+            origin_contact_phone: RPN_ORIGIN.contact_phone,
+            origin_address: RPN_ORIGIN.address,
+            origin_area_id: RPN_ORIGIN.area_id,
+            origin_coordinate: RPN_ORIGIN.coordinate, // required for instant couriers
+            // Destination
             destination_contact_name,
             destination_contact_phone,
             destination_address,
             destination_area_id,
+            // Courier
             courier_company,
             courier_type,
-            delivery_type: 'now',
+            delivery_type,
+            // Items
             items,
-            ...(notes ? { notes } : {}),
+            // Optionals
+            ...(destination_note ? { destination_note } : {}),
+            ...(destination_coordinate ? { destination_coordinate } : {}),
+            ...(order_note ? { order_note } : {}),
         };
 
         const data = await biteshipPost('/orders', payload);
