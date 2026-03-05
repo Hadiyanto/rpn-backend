@@ -17,6 +17,7 @@ import uploadRoute from './upload.route';
 import whatsappRoute from './whatsapp.route';
 import hourlyQuotaRoute from './hourlyQuota.route';
 import salaryRoute from './salary.route';
+import biteshipRoute from './biteship.route';
 
 const router = Router();
 
@@ -37,6 +38,7 @@ router.use(uploadRoute);
 router.use(whatsappRoute);
 router.use(hourlyQuotaRoute);
 router.use(salaryRoute);
+router.use(biteshipRoute);
 
 export default router;
 
