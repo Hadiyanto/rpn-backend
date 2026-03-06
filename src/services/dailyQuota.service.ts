@@ -139,16 +139,28 @@ export const updateDailyQuota = async (id: number, qty: number, hampers_qty?: nu
     if (error) throw error;
 
     // Sync the updated quota to Redis
-    // We only update if successful in DB. By grabbing `data.date` and performing a full calc, we can accurately set the cache.
+    // Calculate the real remaining qty by querying PostgreSQL exactly how many were already sold.
     if (data && data.date) {
         try {
-            // We need to query how much is CURRENTLY used from DB to set proper remaining cache,
-            // since `qty` and `hampers_qty` just dictate the TOTAL for the day.
-            const currentStats = await getDailyQuotaByDate(data.date);
-            if (currentStats) {
-                await redis.set(`quota:${data.date}`, currentStats.remaining_qty);
-                await redis.set(`quota:hampers:${data.date}`, currentStats.remaining_hampers_qty);
-            }
+            // Re-calculate how many were sold to get the correct remaining balance
+            const usedRes = await pool.query(`
+                SELECT 
+                    COALESCE(SUM(CASE WHEN oi.box_type IN ('FULL', 'HALF') THEN oi.qty ELSE 0 END), 0) as used_qty,
+                    COALESCE(SUM(CASE WHEN oi.box_type = 'HAMPERS' THEN oi.qty ELSE 0 END), 0) as used_hampers_qty
+                FROM orders o
+                JOIN order_items oi ON o.id = oi.order_id
+                WHERE to_char(o.pickup_date, 'YYYY-MM-DD') = $1
+                  AND o.status != 'CANCELLED'
+            `, [data.date]);
+
+            const soldQty = parseInt(usedRes.rows[0].used_qty, 10);
+            const soldHampersQty = parseInt(usedRes.rows[0].used_hampers_qty, 10);
+
+            const newRemaining = Math.max(0, data.qty - soldQty);
+            const newRemainingHampers = Math.max(0, (data.hampers_qty || 0) - soldHampersQty);
+
+            await redis.set(`quota:${data.date}`, newRemaining);
+            await redis.set(`quota:hampers:${data.date}`, newRemainingHampers);
         } catch (err) {
             console.error(`Failed to sync updated quota to Redis for date: ${data.date}`, err);
         }
