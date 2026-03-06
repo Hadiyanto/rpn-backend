@@ -224,10 +224,16 @@ router.patch('/order/:id/status', async (req, res) => {
                             destination_area_id: targetOrder.delivery_area_id,
                             destination_coordinate: { latitude: Number(targetOrder.delivery_lat), longitude: Number(targetOrder.delivery_lng) },
                             ...(targetOrder.delivery_driver_note ? { destination_note: targetOrder.delivery_driver_note } : {}),
-                            // Courier defaults to gosend instant
+                            // Courier defaults to grab instant
                             courier_company: 'grab',
                             courier_type: 'instant',
-                            delivery_type: 'now',
+
+                            // Delivery Schedule Logic
+                            delivery_type: isToday ? 'now' : 'scheduled',
+                            ...(isToday ? {} : {
+                                delivery_date: targetOrder.pickup_date,
+                                delivery_time: targetOrder.pickup_time ? targetOrder.pickup_time.split(' ')[0] : '11:00', // Extracts HH:mm
+                            }),
                             // Items
                             items: biteshipItems,
                             order_note: `RPN Order #${targetOrder.id}${targetOrder.note ? ` - ${targetOrder.note}` : ''}`,
