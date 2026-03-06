@@ -163,8 +163,10 @@ router.patch('/order/:id/status', async (req, res) => {
                     const targetOrder = await getOrderById(id);
 
                     if (targetOrder && targetOrder.customer_phone) {
-                        const dateObj = new Date(`${targetOrder.pickup_date}T00:00:00+07:00`);
-                        const scheduleDateStr = dateObj.toLocaleDateString('id-ID', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric', timeZone: 'Asia/Jakarta' });
+                        const [year, month, day] = targetOrder.pickup_date.split('-');
+                        const dateObj = new Date(Number(year), Number(month) - 1, Number(day));
+                        // Force formatting in id-ID locale without timezone shifting
+                        const scheduleDateStr = dateObj.toLocaleDateString('id-ID', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' });
                         const scheduleDate = `${scheduleDateStr}${targetOrder.pickup_time ? ' jam ' + targetOrder.pickup_time : ''}`;
 
                         const waMessage = buildPaidOrderMessage({
@@ -212,12 +214,14 @@ router.patch('/order/:id/status', async (req, res) => {
                             return res.json({ status: 'ok', data }); // Still return OK for the status update itself
                         }
 
-                        // Parse pickup_date to map to scheduled delivery date if needed, or default to now if within same day
-                        const orderDateObj = new Date(`${targetOrder.pickup_date}T00:00:00+07:00`);
-                        const todayLocal = new Date(new Date().getTime() + (7 * 3600 * 1000));
-                        const isToday = orderDateObj.getDate() === todayLocal.getDate() &&
-                            orderDateObj.getMonth() === todayLocal.getMonth() &&
-                            orderDateObj.getFullYear() === todayLocal.getFullYear();
+                        // Parse pickup_date reliably without timezone shifts
+                        const [year, month, day] = targetOrder.pickup_date.split('-');
+                        const orderDateObj = new Date(Number(year), Number(month) - 1, Number(day));
+
+                        const now = new Date();
+                        const todayLocal = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+
+                        const isToday = orderDateObj.getTime() === todayLocal.getTime();
 
                         // Map items to Biteship format
                         const biteshipItems = (targetOrder.items || []).map((item: any) => ({
