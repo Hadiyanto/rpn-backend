@@ -19,7 +19,9 @@ router.get('/daily-quota', async (req, res) => {
         const data = await getDailyQuotas();
         res.json({ status: 'ok', data });
     } catch (e: any) {
-        res.status(500).json({ status: 'error', message: e.message });
+        const msg = e?.message || e?.details || JSON.stringify(e) || 'Unknown error';
+        console.error('[daily-quota GET]', e);
+        res.status(500).json({ status: 'error', message: msg });
     }
 });
 
