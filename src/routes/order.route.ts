@@ -6,6 +6,7 @@ import { getWhatsAppService } from '../services/whatsapp.service';
 import { formatWAPhone } from '../utils/phone';
 import { buildNewOrderMessage, buildPaidOrderMessage, buildDoneOrderMessage, buildTransferReceivedMessage } from '../utils/waMessages';
 import { pool } from '../config/db';
+import { biteshipPost } from '../utils/biteship';
 
 const router = Router();
 
@@ -179,6 +180,67 @@ router.patch('/order/:id/status', async (req, res) => {
                 }
             } catch (waErr) {
                 console.error('Failed to prepare auto WA message on PAID:', waErr);
+            }
+
+            // --- Auto Create Biteship Order ---
+            try {
+                const targetOrder = await getOrderById(id);
+                if (targetOrder && targetOrder.delivery_method === 'store_delivery') {
+                    if (targetOrder.delivery_area_id && targetOrder.delivery_address && targetOrder.delivery_lat && targetOrder.delivery_lng) {
+
+                        // Parse pickup_date to map to scheduled delivery date if needed, or default to now if within same day
+                        const orderDateObj = new Date(`${targetOrder.pickup_date}T00:00:00+07:00`);
+                        const todayLocal = new Date(new Date().getTime() + (7 * 3600 * 1000));
+                        const isToday = orderDateObj.getDate() === todayLocal.getDate() &&
+                            orderDateObj.getMonth() === todayLocal.getMonth() &&
+                            orderDateObj.getFullYear() === todayLocal.getFullYear();
+
+                        // Map items to Biteship format
+                        const biteshipItems = (targetOrder.items || []).map((item: any) => ({
+                            name: `${item.box_type === 'FULL' ? 'Full Box' : item.box_type === 'HALF' ? 'Half Box' : 'Hampers'} - ${item.name}`,
+                            description: `RPN ${item.box_type}`,
+                            value: 50000,
+                            length: item.box_type === 'FULL' ? 20 : 10,
+                            width: item.box_type === 'FULL' ? 20 : 10,
+                            height: 10,
+                            weight: item.box_type === 'FULL' ? 1000 : 500,
+                            quantity: item.qty
+                        }));
+
+                        const payload: Record<string, any> = {
+                            // Shipper = RPN toko
+                            shipper_contact_name: 'RPN Store',
+                            shipper_contact_phone: '081314220599',
+                            // Origin = toko
+                            origin_contact_name: 'RPN Store',
+                            origin_contact_phone: '081314220599',
+                            origin_address: 'Belakang TK Widiastuti, Jalan Rawa Jati Timur VIII, RW 08, Rawajati, Pancoran, Jakarta Selatan, DKI Jakarta 12750',
+                            origin_area_id: 'IDNP6IDNC148IDND841IDZ12750',
+                            origin_coordinate: { latitude: -6.261204, longitude: 106.854106 },
+                            // Destination
+                            destination_contact_name: targetOrder.customer_name,
+                            destination_contact_phone: targetOrder.customer_phone,
+                            destination_address: targetOrder.delivery_address,
+                            destination_area_id: targetOrder.delivery_area_id,
+                            destination_coordinate: { latitude: Number(targetOrder.delivery_lat), longitude: Number(targetOrder.delivery_lng) },
+                            ...(targetOrder.delivery_driver_note ? { destination_note: targetOrder.delivery_driver_note } : {}),
+                            // Courier defaults to gosend instant
+                            courier_company: 'grab',
+                            courier_type: 'instant',
+                            delivery_type: 'now',
+                            // Items
+                            items: biteshipItems,
+                            order_note: `RPN Order #${targetOrder.id}${targetOrder.note ? ` - ${targetOrder.note}` : ''}`,
+                        };
+
+                        await biteshipPost('/orders', payload);
+                        console.log(`[Biteship] Auto-created order for RPN #${targetOrder.id}`);
+                    } else {
+                        console.error(`[Biteship] Order #${targetOrder.id} is store_delivery but missing coordinate/area info.`);
+                    }
+                }
+            } catch (err: any) {
+                console.error(`[Biteship] Failed to auto-create dispatch for Order #${id}:`, err?.message);
             }
         }
 
