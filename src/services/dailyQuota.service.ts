@@ -3,6 +3,7 @@ import { pool } from '../config/db';
 import { redis } from '../utils/redis';
 
 export const getDailyQuotas = async () => {
+    console.log('[DEBUG] getDailyQuotas: Fetching from DB...');
     const res = await pool.query(`
         SELECT 
             id,
@@ -12,11 +13,14 @@ export const getDailyQuotas = async () => {
         FROM daily_quota
         ORDER BY date DESC
     `);
+    console.log(`[DEBUG] getDailyQuotas: DB fetched ${res.rowCount} rows.`);
 
     const keys = res.rows.flatMap(row => [`quota:${row.date}`, `quota:hampers:${row.date}`]);
     let redisVals: (string | number | null)[] = [];
     if (keys.length > 0) {
+        console.log(`[DEBUG] getDailyQuotas: Fetching ${keys.length} keys from Redis...`);
         redisVals = await redis.mget(...keys);
+        console.log('[DEBUG] getDailyQuotas: Redis fetch complete.');
     }
 
     return res.rows.map((row, i) => {
@@ -53,6 +57,7 @@ export const getDailyQuotas = async () => {
 };
 
 export const getDailyQuotaByDate = async (date: string) => {
+    console.log(`[DEBUG] getDailyQuotaByDate: Fetching DB for date ${date}...`);
     const res = await pool.query(`
         SELECT 
             id,
@@ -62,6 +67,7 @@ export const getDailyQuotaByDate = async (date: string) => {
         FROM daily_quota
         WHERE date = $1::date
     `, [date]);
+    console.log(`[DEBUG] getDailyQuotaByDate: DB result rowCount = ${res.rowCount}`);
 
     if (res.rowCount === 0) return null;
 
@@ -72,8 +78,10 @@ export const getDailyQuotaByDate = async (date: string) => {
     let remaining_qty = qty;
     let remaining_hampers_qty = hampers_qty;
 
+    console.log(`[DEBUG] getDailyQuotaByDate: Fetching Redis keys for ${date}...`);
     const rQty = await redis.get(`quota:${date}`);
     const rHampersQty = await redis.get(`quota:hampers:${date}`);
+    console.log(`[DEBUG] getDailyQuotaByDate: Redis fetch complete. rQty=${rQty}, rHampersQty=${rHampersQty}`);
 
     if (rQty !== null && rQty !== undefined) {
         remaining_qty = Math.max(0, Number(rQty));
