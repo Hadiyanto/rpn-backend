@@ -86,50 +86,42 @@ export const createOrder = async (payload: CreateOrderPayload) => {
             throw new Error(`MOHON MAAF: Kuota Hampers untuk tanggal ${pickup_date} sudah penuh. (Sisa: ${sisa} hampers)`);
         }
 
-        // --- 2. HOURLY QUOTA VALIDATION ---
-        if (pickup_time) {
-            const hourStr = pickup_time.split(':')[0] + ':00';
+        // --- 2. HOURLY QUOTA VALIDATION (disabled) ---
+        // if (pickup_time) {
+        //     const hourStr = pickup_time.split(':')[0] + ':00';
+        //     const hourlyRes = await client.query(`
+        //         SELECT qty, hampers_qty 
+        //         FROM hourly_quota 
+        //         WHERE time_str = $1 AND is_active = true 
+        //         FOR UPDATE
+        //     `, [hourStr]);
+        //     if (!hourlyRes.rowCount || hourlyRes.rowCount === 0) {
+        //         throw new Error(`MOHON MAAF: Jam pickup ${hourStr} belum dibuka atau sudah ditutup. Silakan pilih jam lain.`);
+        //     }
+        //     const maxHourly = hourlyRes.rows[0].qty;
+        //     const maxHourlyHampers = hourlyRes.rows[0].hampers_qty || 0;
+        //     const usedHourlyRes = await client.query(`
+        //         SELECT 
+        //             COALESCE(SUM(CASE WHEN oi.box_type = 'HALF' THEN oi.qty * 0.5 WHEN oi.box_type = 'FULL' THEN oi.qty ELSE 0 END), 0) as used_box,
+        //             COALESCE(SUM(CASE WHEN oi.box_type = 'HAMPERS' THEN oi.qty ELSE 0 END), 0) as used_hampers
+        //         FROM order_items oi 
+        //         JOIN orders o ON oi.order_id = o.id 
+        //         WHERE o.pickup_date = $1 
+        //           AND o.pickup_time LIKE $2
+        //           AND o.status != 'CANCELLED'
+        //     `, [pickup_date, `${pickup_time.split(':')[0]}:%`]);
+        //     const usedHourlyBox = parseFloat(usedHourlyRes.rows[0].used_box);
+        //     const usedHourlyHampers = parseFloat(usedHourlyRes.rows[0].used_hampers);
+        //     if (usedHourlyBox + requestedBoxQty > maxHourly) {
+        //         const sisaHour = Math.max(0, maxHourly - usedHourlyBox);
+        //         throw new Error(`MOHON MAAF: Kuota Jam ${hourStr} di tanggal ${pickup_date} sudah penuh. (Sisa Jam Ini: ${sisaHour} box). Silakan pilih jam lain.`);
+        //     }
+        //     if (usedHourlyHampers + requestedHampersQty > maxHourlyHampers) {
+        //         const sisaHour = Math.max(0, maxHourlyHampers - usedHourlyHampers);
+        //         throw new Error(`MOHON MAAF: Kuota Jam Hampers ${hourStr} di tanggal ${pickup_date} sudah penuh. (Sisa Jam Ini: ${sisaHour} hampers). Silakan pilih jam lain.`);
+        //     }
+        // }
 
-            // Lock hourly quota row
-            const hourlyRes = await client.query(`
-                SELECT qty, hampers_qty 
-                FROM hourly_quota 
-                WHERE time_str = $1 AND is_active = true 
-                FOR UPDATE
-            `, [hourStr]);
-
-            if (!hourlyRes.rowCount || hourlyRes.rowCount === 0) {
-                throw new Error(`MOHON MAAF: Jam pickup ${hourStr} belum dibuka atau sudah ditutup. Silakan pilih jam lain.`);
-            }
-
-            const maxHourly = hourlyRes.rows[0].qty;
-            const maxHourlyHampers = hourlyRes.rows[0].hampers_qty || 0;
-
-            // Dynamically calculate the usage for that exact date AND hour block
-            const usedHourlyRes = await client.query(`
-                SELECT 
-                    COALESCE(SUM(CASE WHEN oi.box_type = 'HALF' THEN oi.qty * 0.5 WHEN oi.box_type = 'FULL' THEN oi.qty ELSE 0 END), 0) as used_box,
-                    COALESCE(SUM(CASE WHEN oi.box_type = 'HAMPERS' THEN oi.qty ELSE 0 END), 0) as used_hampers
-                FROM order_items oi 
-                JOIN orders o ON oi.order_id = o.id 
-                WHERE o.pickup_date = $1 
-                  AND o.pickup_time LIKE $2
-                  AND o.status != 'CANCELLED'
-            `, [pickup_date, `${pickup_time.split(':')[0]}:%`]);
-
-            const usedHourlyBox = parseFloat(usedHourlyRes.rows[0].used_box);
-            const usedHourlyHampers = parseFloat(usedHourlyRes.rows[0].used_hampers);
-
-            if (usedHourlyBox + requestedBoxQty > maxHourly) {
-                const sisaHour = Math.max(0, maxHourly - usedHourlyBox);
-                throw new Error(`MOHON MAAF: Kuota Jam ${hourStr} di tanggal ${pickup_date} sudah penuh. (Sisa Jam Ini: ${sisaHour} box). Silakan pilih jam lain.`);
-            }
-
-            if (usedHourlyHampers + requestedHampersQty > maxHourlyHampers) {
-                const sisaHour = Math.max(0, maxHourlyHampers - usedHourlyHampers);
-                throw new Error(`MOHON MAAF: Kuota Jam Hampers ${hourStr} di tanggal ${pickup_date} sudah penuh. (Sisa Jam Ini: ${sisaHour} hampers). Silakan pilih jam lain.`);
-            }
-        }
 
         // --- 3. INSERT ORDER ---
         const orderRes = await client.query(`
