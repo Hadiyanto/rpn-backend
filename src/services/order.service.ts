@@ -1,5 +1,6 @@
 import { supabase } from '../config/supabase';
 import { transaction } from '../config/db';
+import { redis } from '../utils/redis';
 
 export interface OrderItem {
     box_type: 'FULL' | 'HALF' | 'HAMPERS';
@@ -50,81 +51,78 @@ export const createOrder = async (payload: CreateOrderPayload) => {
         }
     }
 
-    return await transaction(async (client) => {
-        // --- 1. DAILY QUOTA VALIDATION ---
-        // Lock quota row for today to prevent race conditions
-        const quotaRes = await client.query('SELECT qty, hampers_qty FROM daily_quota WHERE date = $1 FOR UPDATE', [pickup_date]);
+    // --- 1. DAILY QUOTA VALIDATION (REDIS ATOMIC DECREMENT) ---
+    // If no requested items, skip
+    let reservedBox = false;
+    let reservedHampers = false;
 
-        // If quota isn't defined for this date, assume it's closed/full
-        if (quotaRes.rowCount === 0) {
-            throw new Error(`MOHON MAAF: Penjualan untuk tanggal ${pickup_date} belum dibuka / kuota belum diatur.`);
+    if (requestedBoxQty > 0) {
+        const remainingBox = await redis.decrby(`quota:${pickup_date}`, requestedBoxQty);
+        if (remainingBox < 0) {
+            // Revert atomic decrement if we've gone below zero
+            await redis.incrby(`quota:${pickup_date}`, requestedBoxQty);
+            throw new Error(`MOHON MAAF: Kuota Box untuk tanggal ${pickup_date} sudah penuh.`);
         }
-        const maxQuota = quotaRes.rows[0].qty;
-        const maxHampersQuota = quotaRes.rows[0].hampers_qty || 0;
+        reservedBox = true;
+    }
 
-        // Dynamically calculate the currently grouped usage for that date
-        // (excluding CANCELLED orders)
-        const usedRes = await client.query(`
-            SELECT 
-                COALESCE(SUM(CASE WHEN oi.box_type = 'HALF' THEN oi.qty * 0.5 WHEN oi.box_type = 'FULL' THEN oi.qty ELSE 0 END), 0) as used_box,
-                COALESCE(SUM(CASE WHEN oi.box_type = 'HAMPERS' THEN oi.qty ELSE 0 END), 0) as used_hampers
-            FROM order_items oi 
-            JOIN orders o ON oi.order_id = o.id 
-            WHERE o.pickup_date = $1 AND o.status != 'CANCELLED'
-        `, [pickup_date]);
-
-        const usedBox = parseFloat(usedRes.rows[0].used_box);
-        const usedHampers = parseFloat(usedRes.rows[0].used_hampers);
-
-        if (usedBox + requestedBoxQty > maxQuota) {
-            const sisa = Math.max(0, maxQuota - usedBox);
-            throw new Error(`MOHON MAAF: Kuota Box untuk tanggal ${pickup_date} sudah penuh. (Sisa: ${sisa} box)`);
+    if (requestedHampersQty > 0) {
+        const remainingHampers = await redis.decrby(`quota:hampers:${pickup_date}`, requestedHampersQty);
+        if (remainingHampers < 0) {
+            // Revert atomic decrement
+            await redis.incrby(`quota:hampers:${pickup_date}`, requestedHampersQty);
+            // Also revert box if we reserved earlier but failed hampers
+            if (reservedBox) {
+                await redis.incrby(`quota:${pickup_date}`, requestedBoxQty);
+            }
+            throw new Error(`MOHON MAAF: Kuota Hampers untuk tanggal ${pickup_date} sudah penuh.`);
         }
+        reservedHampers = true;
+    }
 
-        if (usedHampers + requestedHampersQty > maxHampersQuota) {
-            const sisa = Math.max(0, maxHampersQuota - usedHampers);
-            throw new Error(`MOHON MAAF: Kuota Hampers untuk tanggal ${pickup_date} sudah penuh. (Sisa: ${sisa} hampers)`);
-        }
+    try {
+        return await transaction(async (client) => {
+            // --- 2. INSERT ORDER ---
 
-        // --- 2. HOURLY QUOTA VALIDATION (disabled) ---
-        // if (pickup_time) {
-        //     const hourStr = pickup_time.split(':')[0] + ':00';
-        //     const hourlyRes = await client.query(`
-        //         SELECT qty, hampers_qty 
-        //         FROM hourly_quota 
-        //         WHERE time_str = $1 AND is_active = true 
-        //         FOR UPDATE
-        //     `, [hourStr]);
-        //     if (!hourlyRes.rowCount || hourlyRes.rowCount === 0) {
-        //         throw new Error(`MOHON MAAF: Jam pickup ${hourStr} belum dibuka atau sudah ditutup. Silakan pilih jam lain.`);
-        //     }
-        //     const maxHourly = hourlyRes.rows[0].qty;
-        //     const maxHourlyHampers = hourlyRes.rows[0].hampers_qty || 0;
-        //     const usedHourlyRes = await client.query(`
-        //         SELECT 
-        //             COALESCE(SUM(CASE WHEN oi.box_type = 'HALF' THEN oi.qty * 0.5 WHEN oi.box_type = 'FULL' THEN oi.qty ELSE 0 END), 0) as used_box,
-        //             COALESCE(SUM(CASE WHEN oi.box_type = 'HAMPERS' THEN oi.qty ELSE 0 END), 0) as used_hampers
-        //         FROM order_items oi 
-        //         JOIN orders o ON oi.order_id = o.id 
-        //         WHERE o.pickup_date = $1 
-        //           AND o.pickup_time LIKE $2
-        //           AND o.status != 'CANCELLED'
-        //     `, [pickup_date, `${pickup_time.split(':')[0]}:%`]);
-        //     const usedHourlyBox = parseFloat(usedHourlyRes.rows[0].used_box);
-        //     const usedHourlyHampers = parseFloat(usedHourlyRes.rows[0].used_hampers);
-        //     if (usedHourlyBox + requestedBoxQty > maxHourly) {
-        //         const sisaHour = Math.max(0, maxHourly - usedHourlyBox);
-        //         throw new Error(`MOHON MAAF: Kuota Jam ${hourStr} di tanggal ${pickup_date} sudah penuh. (Sisa Jam Ini: ${sisaHour} box). Silakan pilih jam lain.`);
-        //     }
-        //     if (usedHourlyHampers + requestedHampersQty > maxHourlyHampers) {
-        //         const sisaHour = Math.max(0, maxHourlyHampers - usedHourlyHampers);
-        //         throw new Error(`MOHON MAAF: Kuota Jam Hampers ${hourStr} di tanggal ${pickup_date} sudah penuh. (Sisa Jam Ini: ${sisaHour} hampers). Silakan pilih jam lain.`);
-        //     }
-        // }
+            // --- 2. HOURLY QUOTA VALIDATION (disabled) ---
+            // if (pickup_time) {
+            //     const hourStr = pickup_time.split(':')[0] + ':00';
+            //     const hourlyRes = await client.query(`
+            //         SELECT qty, hampers_qty 
+            //         FROM hourly_quota 
+            //         WHERE time_str = $1 AND is_active = true 
+            //         FOR UPDATE
+            //     `, [hourStr]);
+            //     if (!hourlyRes.rowCount || hourlyRes.rowCount === 0) {
+            //         throw new Error(`MOHON MAAF: Jam pickup ${hourStr} belum dibuka atau sudah ditutup. Silakan pilih jam lain.`);
+            //     }
+            //     const maxHourly = hourlyRes.rows[0].qty;
+            //     const maxHourlyHampers = hourlyRes.rows[0].hampers_qty || 0;
+            //     const usedHourlyRes = await client.query(`
+            //         SELECT 
+            //             COALESCE(SUM(CASE WHEN oi.box_type = 'HALF' THEN oi.qty * 0.5 WHEN oi.box_type = 'FULL' THEN oi.qty ELSE 0 END), 0) as used_box,
+            //             COALESCE(SUM(CASE WHEN oi.box_type = 'HAMPERS' THEN oi.qty ELSE 0 END), 0) as used_hampers
+            //         FROM order_items oi 
+            //         JOIN orders o ON oi.order_id = o.id 
+            //         WHERE o.pickup_date = $1 
+            //           AND o.pickup_time LIKE $2
+            //           AND o.status != 'CANCELLED'
+            //     `, [pickup_date, `${pickup_time.split(':')[0]}:%`]);
+            //     const usedHourlyBox = parseFloat(usedHourlyRes.rows[0].used_box);
+            //     const usedHourlyHampers = parseFloat(usedHourlyRes.rows[0].used_hampers);
+            //     if (usedHourlyBox + requestedBoxQty > maxHourly) {
+            //         const sisaHour = Math.max(0, maxHourly - usedHourlyBox);
+            //         throw new Error(`MOHON MAAF: Kuota Jam ${hourStr} di tanggal ${pickup_date} sudah penuh. (Sisa Jam Ini: ${sisaHour} box). Silakan pilih jam lain.`);
+            //     }
+            //     if (usedHourlyHampers + requestedHampersQty > maxHourlyHampers) {
+            //         const sisaHour = Math.max(0, maxHourlyHampers - usedHourlyHampers);
+            //         throw new Error(`MOHON MAAF: Kuota Jam Hampers ${hourStr} di tanggal ${pickup_date} sudah penuh. (Sisa Jam Ini: ${sisaHour} hampers). Silakan pilih jam lain.`);
+            //     }
+            // }
 
 
-        // --- 3. INSERT ORDER ---
-        const orderRes = await client.query(`
+            // --- 3. INSERT ORDER ---
+            const orderRes = await client.query(`
             INSERT INTO orders (
                 customer_name, customer_phone, pickup_date, pickup_time, note, status, payment_method,
                 delivery_method, delivery_lat, delivery_lng, delivery_address, delivery_driver_note, delivery_area_id
@@ -132,35 +130,46 @@ export const createOrder = async (payload: CreateOrderPayload) => {
             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13) 
             RETURNING *
         `, [
-            customer_name,
-            customer_phone,
-            pickup_date,
-            pickup_time ?? '11:00 - 16:00',
-            note ?? null,
-            'UNPAID',
-            payment_method ?? null,
-            delivery_method ?? 'pickup',
-            delivery_lat ?? null,
-            delivery_lng ?? null,
-            delivery_address ?? null,
-            delivery_driver_note ?? null,
-            delivery_area_id ?? null,
-        ]);
+                customer_name,
+                customer_phone,
+                pickup_date,
+                pickup_time ?? '11:00 - 16:00',
+                note ?? null,
+                'UNPAID',
+                payment_method ?? null,
+                delivery_method ?? 'pickup',
+                delivery_lat ?? null,
+                delivery_lng ?? null,
+                delivery_address ?? null,
+                delivery_driver_note ?? null,
+                delivery_area_id ?? null,
+            ]);
 
-        const order = orderRes.rows[0];
+            const order = orderRes.rows[0];
+            const orderItems = [];
 
-        // 5. Insert order items
-        for (const item of pesanan) {
-            await client.query(`
+            // 5. Insert order items
+            for (const item of pesanan) {
+                await client.query(`
                 INSERT INTO order_items (order_id, box_type, name, qty) 
                 VALUES ($1, $2, $3, $4)
             `, [order.id, item.box_type, item.name, item.qty]);
+                orderItems.push(item);
+            }
+            return { ...order, items: orderItems };
+        });
+    } catch (e) {
+        // If the database transaction failed for any reason AFTER we successfully reserved in Redis,
+        // we must rollback our Redis cache decrement immediately.
+        if (reservedBox) {
+            await redis.incrby(`quota:${pickup_date}`, requestedBoxQty);
         }
-
-        return { ...order, items: pesanan };
-    });
+        if (reservedHampers) {
+            await redis.incrby(`quota:hampers:${pickup_date}`, requestedHampersQty);
+        }
+        throw e;
+    }
 };
-
 export const getOrders = async (filters?: GetOrdersFilter) => {
     let query = supabase
         .from('orders')

@@ -7,6 +7,7 @@ import { formatWAPhone } from '../utils/phone';
 import { buildNewOrderMessage, buildPaidOrderMessage, buildDoneOrderMessage, buildTransferReceivedMessage } from '../utils/waMessages';
 import { pool } from '../config/db';
 import { biteshipPost } from '../utils/biteship';
+import { redis } from '../utils/redis';
 
 const router = Router();
 
@@ -154,6 +155,35 @@ router.patch('/order/:id/status', async (req, res) => {
 
         const data = await updateOrderStatus(id, status);
 
+        // Redis quota restoration if CANCELLED
+        if (status.toUpperCase() === 'CANCELLED') {
+            try {
+                const targetOrder = await getOrderById(id);
+                if (targetOrder && targetOrder.items && targetOrder.items.length > 0) {
+                    let canceledBox = 0;
+                    let canceledHampers = 0;
+
+                    for (const item of targetOrder.items) {
+                        if (item.box_type === 'FULL') {
+                            canceledBox += item.qty;
+                        } else if (item.box_type === 'HALF') {
+                            canceledBox += item.qty * 0.5;
+                        } else if (item.box_type === 'HAMPERS') {
+                            canceledHampers += item.qty;
+                        }
+                    }
+
+                    if (canceledBox > 0) {
+                        await redis.incrby(`quota:${targetOrder.pickup_date}`, canceledBox);
+                    }
+                    if (canceledHampers > 0) {
+                        await redis.incrby(`quota:hampers:${targetOrder.pickup_date}`, canceledHampers);
+                    }
+                }
+            } catch (err) {
+                console.error(`Failed to restore Redis quota for cancelled order #${id}:`, err);
+            }
+        }
         // Auto-send WhatsApp if status becomes PAID
         if (status.toUpperCase() === 'PAID') {
             try {
