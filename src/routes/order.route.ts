@@ -186,7 +186,31 @@ router.patch('/order/:id/status', async (req, res) => {
             try {
                 const targetOrder = await getOrderById(id);
                 if (targetOrder && targetOrder.delivery_method === 'store_delivery') {
-                    if (targetOrder.delivery_area_id && targetOrder.delivery_address && targetOrder.delivery_lat && targetOrder.delivery_lng) {
+                    if (targetOrder.delivery_address && targetOrder.delivery_lat && targetOrder.delivery_lng) {
+
+                        let areaId = targetOrder.delivery_area_id;
+
+                        // Fallback: If area_id is missing, try to resolve it from the postal code in the address
+                        if (!areaId) {
+                            try {
+                                const postalMatch = targetOrder.delivery_address.match(/\b\d{5}\b/);
+                                if (postalMatch) {
+                                    const { biteshipGet } = await import('../utils/biteship');
+                                    const areaData: any = await biteshipGet(`/maps/areas?countries=ID&input=${postalMatch[0]}&type=single`);
+                                    if (areaData?.areas?.length > 0) {
+                                        areaId = areaData.areas[0].id;
+                                        console.log(`[Biteship] Auto-resolved area_id ${areaId} for Order #${targetOrder.id}`);
+                                    }
+                                }
+                            } catch (e) {
+                                console.error(`[Biteship] Failed to auto-resolve area_id for Order #${targetOrder.id}`, e);
+                            }
+                        }
+
+                        if (!areaId) {
+                            console.error(`[Biteship] Cannot create order #${targetOrder.id}: delivery_area_id is missing and could not be resolved.`);
+                            return res.json({ status: 'ok', data }); // Still return OK for the status update itself
+                        }
 
                         // Parse pickup_date to map to scheduled delivery date if needed, or default to now if within same day
                         const orderDateObj = new Date(`${targetOrder.pickup_date}T00:00:00+07:00`);
@@ -221,7 +245,7 @@ router.patch('/order/:id/status', async (req, res) => {
                             destination_contact_name: targetOrder.customer_name,
                             destination_contact_phone: targetOrder.customer_phone,
                             destination_address: targetOrder.delivery_address,
-                            destination_area_id: targetOrder.delivery_area_id,
+                            destination_area_id: areaId,
                             destination_coordinate: { latitude: Number(targetOrder.delivery_lat), longitude: Number(targetOrder.delivery_lng) },
                             ...(targetOrder.delivery_driver_note ? { destination_note: targetOrder.delivery_driver_note } : {}),
                             // Courier defaults to grab instant
@@ -242,7 +266,7 @@ router.patch('/order/:id/status', async (req, res) => {
                         await biteshipPost('/orders', payload);
                         console.log(`[Biteship] Auto-created order for RPN #${targetOrder.id}`);
                     } else {
-                        console.error(`[Biteship] Order #${targetOrder.id} is store_delivery but missing coordinate/area info.`);
+                        console.error(`[Biteship] Order #${targetOrder.id} is store_delivery but missing coordinate/address info.`);
                     }
                 }
             } catch (err: any) {
