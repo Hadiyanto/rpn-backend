@@ -34,6 +34,10 @@ export const getDailyQuotas = async () => {
 
         if (rQty !== null && rQty !== undefined) {
             remaining_qty = Math.max(0, Number(rQty));
+            if (qty < remaining_qty) {
+                remaining_qty = Math.max(0, qty);
+                redis.set(`quota:${row.date}`, remaining_qty).catch(console.error);
+            }
         } else {
             // Cache warming if Redis dropped it
             redis.set(`quota:${row.date}`, remaining_qty).catch(console.error);
@@ -41,6 +45,10 @@ export const getDailyQuotas = async () => {
 
         if (rHampersQty !== null && rHampersQty !== undefined) {
             remaining_hampers_qty = Math.max(0, Number(rHampersQty));
+            if (hampers_qty < remaining_hampers_qty) {
+                remaining_hampers_qty = Math.max(0, hampers_qty);
+                redis.set(`quota:hampers:${row.date}`, remaining_hampers_qty).catch(console.error);
+            }
         } else {
             // Cache warming
             redis.set(`quota:hampers:${row.date}`, remaining_hampers_qty).catch(console.error);
@@ -87,12 +95,20 @@ export const getDailyQuotaByDate = async (date: string) => {
 
     if (rQty !== null && rQty !== undefined) {
         remaining_qty = Math.max(0, Number(rQty));
+        if (qty < remaining_qty) {
+            remaining_qty = Math.max(0, qty);
+            redis.set(`quota:${date}`, remaining_qty).catch(console.error);
+        }
     } else {
         redis.set(`quota:${date}`, remaining_qty).catch(console.error);
     }
 
     if (rHampersQty !== null && rHampersQty !== undefined) {
         remaining_hampers_qty = Math.max(0, Number(rHampersQty));
+        if (hampers_qty < remaining_hampers_qty) {
+            remaining_hampers_qty = Math.max(0, hampers_qty);
+            redis.set(`quota:hampers:${date}`, remaining_hampers_qty).catch(console.error);
+        }
     } else {
         redis.set(`quota:hampers:${date}`, remaining_hampers_qty).catch(console.error);
     }

@@ -64,12 +64,20 @@ export const getHourlyAvailability = async (date: string): Promise<(HourlyQuota 
 
         if (rQty !== null && rQty !== undefined) {
             remaining_qty = Math.max(0, Number(rQty));
+            if (qty < remaining_qty) {
+                remaining_qty = Math.max(0, qty);
+                redis.set(`hourly:${date}:${row.time_str}`, remaining_qty).catch(console.error);
+            }
         } else {
             redis.set(`hourly:${date}:${row.time_str}`, remaining_qty).catch(console.error);
         }
 
         if (rHampersQty !== null && rHampersQty !== undefined) {
             remaining_hampers_qty = Math.max(0, Number(rHampersQty));
+            if (hampers_qty < remaining_hampers_qty) {
+                remaining_hampers_qty = Math.max(0, hampers_qty);
+                redis.set(`hourly:hampers:${date}:${row.time_str}`, remaining_hampers_qty).catch(console.error);
+            }
         } else {
             redis.set(`hourly:hampers:${date}:${row.time_str}`, remaining_hampers_qty).catch(console.error);
         }
