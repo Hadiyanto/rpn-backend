@@ -129,3 +129,35 @@ export const deleteHourlyQuota = async (id: number) => {
     });
     return true;
 };
+
+export const syncHourlyRedisQuota = async (date: string) => {
+    try {
+        const res = await pool.query(`
+            SELECT 
+                hq.time_str, 
+                hq.qty, 
+                hq.hampers_qty,
+                COALESCE(SUM(CASE WHEN oi.box_type IN ('FULL', 'HALF') THEN oi.qty ELSE 0 END), 0) as used_qty,
+                COALESCE(SUM(CASE WHEN oi.box_type = 'HAMPERS' THEN oi.qty ELSE 0 END), 0) as used_hampers_qty
+            FROM hourly_quota hq
+            LEFT JOIN orders o ON o.pickup_date = $1 AND o.pickup_time LIKE (substring(hq.time_str, 1, 2) || '%') AND o.status != 'CANCELLED'
+            LEFT JOIN order_items oi ON oi.order_id = o.id
+            GROUP BY hq.time_str, hq.qty, hq.hampers_qty
+        `, [date]);
+
+        for (const row of res.rows) {
+            const qty = parseFloat(row.qty);
+            const hampers_qty = parseFloat(row.hampers_qty || '0');
+            const used_qty = parseFloat(row.used_qty);
+            const used_hampers_qty = parseFloat(row.used_hampers_qty);
+
+            const rQty = Math.max(0, qty - used_qty);
+            const rHampersQty = Math.max(0, hampers_qty - used_hampers_qty);
+
+            await redis.set(`hourly:${date}:${row.time_str}`, rQty);
+            await redis.set(`hourly:hampers:${date}:${row.time_str}`, rHampersQty);
+        }
+    } catch (err) {
+        console.error(`Failed to sync hourly Redis quotas for date: ${date}`, err);
+    }
+};

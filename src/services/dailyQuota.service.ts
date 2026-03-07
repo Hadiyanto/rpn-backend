@@ -164,29 +164,7 @@ export const updateDailyQuota = async (id: number, qty: number, hampers_qty?: nu
     // Sync the updated quota to Redis
     // Calculate the real remaining qty by querying PostgreSQL exactly how many were already sold.
     if (data && data.date) {
-        try {
-            // Re-calculate how many were sold to get the correct remaining balance
-            const usedRes = await pool.query(`
-                SELECT 
-                    COALESCE(SUM(CASE WHEN oi.box_type IN ('FULL', 'HALF') THEN oi.qty ELSE 0 END), 0) as used_qty,
-                    COALESCE(SUM(CASE WHEN oi.box_type = 'HAMPERS' THEN oi.qty ELSE 0 END), 0) as used_hampers_qty
-                FROM orders o
-                JOIN order_items oi ON o.id = oi.order_id
-                WHERE to_char(o.pickup_date, 'YYYY-MM-DD') = $1
-                  AND o.status != 'CANCELLED'
-            `, [data.date]);
-
-            const soldQty = parseInt(usedRes.rows[0].used_qty, 10);
-            const soldHampersQty = parseInt(usedRes.rows[0].used_hampers_qty, 10);
-
-            const newRemaining = Math.max(0, data.qty - soldQty);
-            const newRemainingHampers = Math.max(0, (data.hampers_qty || 0) - soldHampersQty);
-
-            await redis.set(`quota:${data.date}`, newRemaining);
-            await redis.set(`quota:hampers:${data.date}`, newRemainingHampers);
-        } catch (err) {
-            console.error(`Failed to sync updated quota to Redis for date: ${data.date}`, err);
-        }
+        await syncDailyRedisQuota(data.date);
     }
 
     return data;
@@ -217,4 +195,33 @@ export const deleteDailyQuota = async (id: number) => {
     }
 
     return true;
+};
+
+export const syncDailyRedisQuota = async (date: string) => {
+    try {
+        const dqRes = await pool.query('SELECT qty, hampers_qty FROM daily_quota WHERE date = $1::date', [date]);
+        if (dqRes.rowCount === 0) return;
+        const { qty, hampers_qty } = dqRes.rows[0];
+
+        const usedRes = await pool.query(`
+            SELECT 
+                COALESCE(SUM(CASE WHEN oi.box_type IN ('FULL', 'HALF') THEN oi.qty ELSE 0 END), 0) as used_qty,
+                COALESCE(SUM(CASE WHEN oi.box_type = 'HAMPERS' THEN oi.qty ELSE 0 END), 0) as used_hampers_qty
+            FROM orders o
+            JOIN order_items oi ON o.id = oi.order_id
+            WHERE to_char(o.pickup_date, 'YYYY-MM-DD') = $1
+              AND o.status != 'CANCELLED'
+        `, [date]);
+
+        const soldQty = parseInt(usedRes.rows[0].used_qty, 10);
+        const soldHampersQty = parseInt(usedRes.rows[0].used_hampers_qty, 10);
+
+        const newRemaining = Math.max(0, qty - soldQty);
+        const newRemainingHampers = Math.max(0, (hampers_qty || 0) - soldHampersQty);
+
+        await redis.set(`quota:${date}`, newRemaining);
+        await redis.set(`quota:hampers:${date}`, newRemainingHampers);
+    } catch (err) {
+        console.error(`Failed to sync updated daily quota to Redis for date: ${date}`, err);
+    }
 };

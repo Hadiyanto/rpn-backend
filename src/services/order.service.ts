@@ -1,6 +1,8 @@
 import { supabase } from '../config/supabase';
 import { transaction } from '../config/db';
 import { redis } from '../utils/redis';
+import { syncDailyRedisQuota } from './dailyQuota.service';
+import { syncHourlyRedisQuota } from './hourlyQuota.service';
 
 export interface OrderItem {
     box_type: 'FULL' | 'HALF' | 'HAMPERS';
@@ -295,6 +297,8 @@ export const updateOrderStatus = async (id: number, status: string) => {
         throw new Error(`Status tidak valid. Pilihan: ${VALID_STATUSES.join(', ')}`);
     }
 
+    const oldOrder = await getOrderById(id);
+
     const { data, error } = await supabase
         .from('orders')
         .update({ status: upperStatus })
@@ -304,6 +308,15 @@ export const updateOrderStatus = async (id: number, status: string) => {
 
     if (error) throw error;
     if (!data) throw new Error(`Order dengan id ${id} tidak ditemukan`);
+
+    // If order was cancelled or uncancelled, sync quotas to reclaim or use slots
+    if (oldOrder && oldOrder.pickup_date) {
+        if ((oldOrder.status === 'CANCELLED' && upperStatus !== 'CANCELLED') ||
+            (oldOrder.status !== 'CANCELLED' && upperStatus === 'CANCELLED')) {
+            await syncDailyRedisQuota(oldOrder.pickup_date);
+            await syncHourlyRedisQuota(oldOrder.pickup_date);
+        }
+    }
 
     return data;
 };
@@ -320,6 +333,7 @@ export interface UpdateOrderPayload {
 
 export const updateOrder = async (id: number, payload: UpdateOrderPayload) => {
     const { customer_name, pesanan, pickup_date, pickup_time, note, payment_method } = payload;
+    const oldOrder = await getOrderById(id);
 
     // 1. Update order header
     const updateFields: Record<string, unknown> = {};
@@ -358,10 +372,22 @@ export const updateOrder = async (id: number, payload: UpdateOrderPayload) => {
                 );
             }
         });
-
-        return { ...order, items: pesanan };
     }
 
+    // Forces generic recalculation of quota usage to prevent Redis ghost slots
+    if (oldOrder && oldOrder.pickup_date) {
+        await syncDailyRedisQuota(oldOrder.pickup_date);
+        await syncHourlyRedisQuota(oldOrder.pickup_date);
+    }
+    if (pickup_date && pickup_date !== oldOrder?.pickup_date) {
+        // If the date changed, we must sync the new date as well
+        await syncDailyRedisQuota(pickup_date);
+        await syncHourlyRedisQuota(pickup_date);
+    }
+
+    if (pesanan && pesanan.length > 0) {
+        return { ...order, items: pesanan };
+    }
     return order;
 };
 
