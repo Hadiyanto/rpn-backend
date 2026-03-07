@@ -55,6 +55,9 @@ export const createOrder = async (payload: CreateOrderPayload) => {
     // If no requested items, skip
     let reservedBox = false;
     let reservedHampers = false;
+    let reservedHourlyBox = false;
+    let reservedHourlyHampers = false;
+    let hourStr = '';
 
     if (requestedBoxQty > 0) {
         const remainingBox = await redis.decrby(`quota:${pickup_date}`, requestedBoxQty);
@@ -84,41 +87,76 @@ export const createOrder = async (payload: CreateOrderPayload) => {
         return await transaction(async (client) => {
             // --- 2. INSERT ORDER ---
 
-            // --- 2. HOURLY QUOTA VALIDATION (disabled) ---
-            // if (pickup_time) {
-            //     const hourStr = pickup_time.split(':')[0] + ':00';
-            //     const hourlyRes = await client.query(`
-            //         SELECT qty, hampers_qty 
-            //         FROM hourly_quota 
-            //         WHERE time_str = $1 AND is_active = true 
-            //         FOR UPDATE
-            //     `, [hourStr]);
-            //     if (!hourlyRes.rowCount || hourlyRes.rowCount === 0) {
-            //         throw new Error(`MOHON MAAF: Jam pickup ${hourStr} belum dibuka atau sudah ditutup. Silakan pilih jam lain.`);
-            //     }
-            //     const maxHourly = hourlyRes.rows[0].qty;
-            //     const maxHourlyHampers = hourlyRes.rows[0].hampers_qty || 0;
-            //     const usedHourlyRes = await client.query(`
-            //         SELECT 
-            //             COALESCE(SUM(CASE WHEN oi.box_type = 'HALF' THEN oi.qty * 0.5 WHEN oi.box_type = 'FULL' THEN oi.qty ELSE 0 END), 0) as used_box,
-            //             COALESCE(SUM(CASE WHEN oi.box_type = 'HAMPERS' THEN oi.qty ELSE 0 END), 0) as used_hampers
-            //         FROM order_items oi 
-            //         JOIN orders o ON oi.order_id = o.id 
-            //         WHERE o.pickup_date = $1 
-            //           AND o.pickup_time LIKE $2
-            //           AND o.status != 'CANCELLED'
-            //     `, [pickup_date, `${pickup_time.split(':')[0]}:%`]);
-            //     const usedHourlyBox = parseFloat(usedHourlyRes.rows[0].used_box);
-            //     const usedHourlyHampers = parseFloat(usedHourlyRes.rows[0].used_hampers);
-            //     if (usedHourlyBox + requestedBoxQty > maxHourly) {
-            //         const sisaHour = Math.max(0, maxHourly - usedHourlyBox);
-            //         throw new Error(`MOHON MAAF: Kuota Jam ${hourStr} di tanggal ${pickup_date} sudah penuh. (Sisa Jam Ini: ${sisaHour} box). Silakan pilih jam lain.`);
-            //     }
-            //     if (usedHourlyHampers + requestedHampersQty > maxHourlyHampers) {
-            //         const sisaHour = Math.max(0, maxHourlyHampers - usedHourlyHampers);
-            //         throw new Error(`MOHON MAAF: Kuota Jam Hampers ${hourStr} di tanggal ${pickup_date} sudah penuh. (Sisa Jam Ini: ${sisaHour} hampers). Silakan pilih jam lain.`);
-            //     }
-            // }
+            // --- 2. HOURLY QUOTA VALIDATION (REDIS ATOMIC DECREMENT) ---
+            if (pickup_time) {
+                hourStr = pickup_time.split(':')[0] + ':00';
+
+                // Fetch base capacity and active status from DB
+                const hourlyRes = await client.query(`
+                    SELECT qty, hampers_qty 
+                    FROM hourly_quota 
+                    WHERE time_str = $1 AND is_active = true
+                `, [hourStr]);
+
+                if (!hourlyRes.rowCount || hourlyRes.rowCount === 0) {
+                    throw new Error(`MOHON MAAF: Jam pickup ${hourStr} belum dibuka atau sudah ditutup. Silakan pilih jam lain.`);
+                }
+                const maxHourly = parseFloat(hourlyRes.rows[0].qty);
+                const maxHourlyHampers = parseFloat(hourlyRes.rows[0].hampers_qty || '0');
+
+                // Warm up Redis Hourly Cache if it doesn't exist
+                const rHourlyBox = await redis.get(`hourly:${pickup_date}:${hourStr}`);
+                if (rHourlyBox === null) {
+                    const usedHourlyRes = await client.query(`
+                        SELECT 
+                            COALESCE(SUM(CASE WHEN oi.box_type = 'HALF' THEN oi.qty * 0.5 WHEN oi.box_type = 'FULL' THEN oi.qty ELSE 0 END), 0) as used_box
+                        FROM order_items oi 
+                        JOIN orders o ON oi.order_id = o.id 
+                        WHERE o.pickup_date = $1 
+                        AND o.pickup_time LIKE $2
+                        AND o.status != 'CANCELLED'
+                    `, [pickup_date, `${pickup_time.split(':')[0]}:%`]);
+                    const usedHourlyBox = parseFloat(usedHourlyRes.rows[0].used_box);
+                    await redis.set(`hourly:${pickup_date}:${hourStr}`, Math.max(0, maxHourly - usedHourlyBox));
+                }
+
+                const rHourlyHampers = await redis.get(`hourly:hampers:${pickup_date}:${hourStr}`);
+                if (rHourlyHampers === null) {
+                    const usedHourlyRes = await client.query(`
+                        SELECT 
+                            COALESCE(SUM(CASE WHEN oi.box_type = 'HAMPERS' THEN oi.qty ELSE 0 END), 0) as used_hampers
+                        FROM order_items oi 
+                        JOIN orders o ON oi.order_id = o.id 
+                        WHERE o.pickup_date = $1 
+                        AND o.pickup_time LIKE $2
+                        AND o.status != 'CANCELLED'
+                    `, [pickup_date, `${pickup_time.split(':')[0]}:%`]);
+                    const usedHourlyHampers = parseFloat(usedHourlyRes.rows[0].used_hampers);
+                    await redis.set(`hourly:hampers:${pickup_date}:${hourStr}`, Math.max(0, maxHourlyHampers - usedHourlyHampers));
+                }
+
+                // Perform Atomic Decrements for Hourly
+                if (requestedBoxQty > 0) {
+                    const remainingHourlyBox = await redis.decrby(`hourly:${pickup_date}:${hourStr}`, requestedBoxQty);
+                    if (remainingHourlyBox < 0) {
+                        await redis.incrby(`hourly:${pickup_date}:${hourStr}`, requestedBoxQty);
+                        throw new Error(`MOHON MAAF: Kuota Jam ${hourStr} di tanggal ${pickup_date} sudah penuh. Silakan pilih jam lain.`);
+                    }
+                    reservedHourlyBox = true;
+                }
+
+                if (requestedHampersQty > 0) {
+                    const remainingHourlyHampers = await redis.decrby(`hourly:hampers:${pickup_date}:${hourStr}`, requestedHampersQty);
+                    if (remainingHourlyHampers < 0) {
+                        await redis.incrby(`hourly:hampers:${pickup_date}:${hourStr}`, requestedHampersQty);
+                        if (reservedHourlyBox) {
+                            await redis.incrby(`hourly:${pickup_date}:${hourStr}`, requestedBoxQty);
+                        }
+                        throw new Error(`MOHON MAAF: Kuota Jam Hampers ${hourStr} di tanggal ${pickup_date} sudah penuh. Silakan pilih jam lain.`);
+                    }
+                    reservedHourlyHampers = true;
+                }
+            }
 
 
             // --- 3. INSERT ORDER ---
@@ -167,6 +205,15 @@ export const createOrder = async (payload: CreateOrderPayload) => {
         if (reservedHampers) {
             await redis.incrby(`quota:hampers:${pickup_date}`, requestedHampersQty);
         }
+
+        // Also rollback hourly quotas if they were reserved and then DB failed
+        if (reservedHourlyBox && hourStr) {
+            await redis.incrby(`hourly:${pickup_date}:${hourStr}`, requestedBoxQty);
+        }
+        if (reservedHourlyHampers && hourStr) {
+            await redis.incrby(`hourly:hampers:${pickup_date}:${hourStr}`, requestedHampersQty);
+        }
+
         throw e;
     }
 };
