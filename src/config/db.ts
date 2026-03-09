@@ -12,8 +12,14 @@ export const pool = new Pool({
     connectionString,
     max: 20, // Increase max connections due to deployment overlapping
     idleTimeoutMillis: 10000, // Close idle connections after 10 seconds
-    connectionTimeoutMillis: 5000, // Wait max 5 seconds before failing to connect
+    connectionTimeoutMillis: 15000, // Wait max 15 seconds before failing to connect
+    keepAlive: true, // Prevent proxy from silently dropping connections
     ssl: { rejectUnauthorized: false }, // Required by some cloud DB platforms including Supabase
+});
+
+// Catch pool errors so idle connection terminations don't crash the Node application
+pool.on('error', (err, client) => {
+    console.error('Unexpected error on idle database client', err);
 });
 
 // Generic transaction wrapper that provides a safe PoolClient
