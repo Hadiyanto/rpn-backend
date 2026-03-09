@@ -62,23 +62,25 @@ export const createOrder = async (payload: CreateOrderPayload) => {
     let hourStr = '';
 
     if (requestedBoxQty > 0) {
-        const remainingBox = await redis.decrby(`quota:${pickup_date}`, requestedBoxQty);
+        const remainingBoxStr = await redis.incrbyfloat(`quota:${pickup_date}`, -requestedBoxQty);
+        const remainingBox = parseFloat(remainingBoxStr as unknown as string);
         if (remainingBox < 0) {
             // Revert atomic decrement if we've gone below zero
-            await redis.incrby(`quota:${pickup_date}`, requestedBoxQty);
+            await redis.incrbyfloat(`quota:${pickup_date}`, requestedBoxQty);
             throw new Error(`MOHON MAAF: Kuota Box untuk tanggal ${pickup_date} sudah penuh.`);
         }
         reservedBox = true;
     }
 
     if (requestedHampersQty > 0) {
-        const remainingHampers = await redis.decrby(`quota:hampers:${pickup_date}`, requestedHampersQty);
+        const remainingHampersStr = await redis.incrbyfloat(`quota:hampers:${pickup_date}`, -requestedHampersQty);
+        const remainingHampers = parseFloat(remainingHampersStr as unknown as string);
         if (remainingHampers < 0) {
             // Revert atomic decrement
-            await redis.incrby(`quota:hampers:${pickup_date}`, requestedHampersQty);
+            await redis.incrbyfloat(`quota:hampers:${pickup_date}`, requestedHampersQty);
             // Also revert box if we reserved earlier but failed hampers
             if (reservedBox) {
-                await redis.incrby(`quota:${pickup_date}`, requestedBoxQty);
+                await redis.incrbyfloat(`quota:${pickup_date}`, requestedBoxQty);
             }
             throw new Error(`MOHON MAAF: Kuota Hampers untuk tanggal ${pickup_date} sudah penuh.`);
         }
@@ -139,20 +141,22 @@ export const createOrder = async (payload: CreateOrderPayload) => {
 
                 // Perform Atomic Decrements for Hourly
                 if (requestedBoxQty > 0) {
-                    const remainingHourlyBox = await redis.decrby(`hourly:${pickup_date}:${hourStr}`, requestedBoxQty);
+                    const remainingHourlyBoxStr = await redis.incrbyfloat(`hourly:${pickup_date}:${hourStr}`, -requestedBoxQty);
+                    const remainingHourlyBox = parseFloat(remainingHourlyBoxStr as unknown as string);
                     if (remainingHourlyBox < 0) {
-                        await redis.incrby(`hourly:${pickup_date}:${hourStr}`, requestedBoxQty);
+                        await redis.incrbyfloat(`hourly:${pickup_date}:${hourStr}`, requestedBoxQty);
                         throw new Error(`MOHON MAAF: Kuota Jam ${hourStr} di tanggal ${pickup_date} sudah penuh. Silakan pilih jam lain.`);
                     }
                     reservedHourlyBox = true;
                 }
 
                 if (requestedHampersQty > 0) {
-                    const remainingHourlyHampers = await redis.decrby(`hourly:hampers:${pickup_date}:${hourStr}`, requestedHampersQty);
+                    const remainingHourlyHampersStr = await redis.incrbyfloat(`hourly:hampers:${pickup_date}:${hourStr}`, -requestedHampersQty);
+                    const remainingHourlyHampers = parseFloat(remainingHourlyHampersStr as unknown as string);
                     if (remainingHourlyHampers < 0) {
-                        await redis.incrby(`hourly:hampers:${pickup_date}:${hourStr}`, requestedHampersQty);
+                        await redis.incrbyfloat(`hourly:hampers:${pickup_date}:${hourStr}`, requestedHampersQty);
                         if (reservedHourlyBox) {
-                            await redis.incrby(`hourly:${pickup_date}:${hourStr}`, requestedBoxQty);
+                            await redis.incrbyfloat(`hourly:${pickup_date}:${hourStr}`, requestedBoxQty);
                         }
                         throw new Error(`MOHON MAAF: Kuota Jam Hampers ${hourStr} di tanggal ${pickup_date} sudah penuh. Silakan pilih jam lain.`);
                     }
@@ -202,18 +206,18 @@ export const createOrder = async (payload: CreateOrderPayload) => {
         // If the database transaction failed for any reason AFTER we successfully reserved in Redis,
         // we must rollback our Redis cache decrement immediately.
         if (reservedBox) {
-            await redis.incrby(`quota:${pickup_date}`, requestedBoxQty);
+            await redis.incrbyfloat(`quota:${pickup_date}`, requestedBoxQty);
         }
         if (reservedHampers) {
-            await redis.incrby(`quota:hampers:${pickup_date}`, requestedHampersQty);
+            await redis.incrbyfloat(`quota:hampers:${pickup_date}`, requestedHampersQty);
         }
 
         // Also rollback hourly quotas if they were reserved and then DB failed
         if (reservedHourlyBox && hourStr) {
-            await redis.incrby(`hourly:${pickup_date}:${hourStr}`, requestedBoxQty);
+            await redis.incrbyfloat(`hourly:${pickup_date}:${hourStr}`, requestedBoxQty);
         }
         if (reservedHourlyHampers && hourStr) {
-            await redis.incrby(`hourly:hampers:${pickup_date}:${hourStr}`, requestedHampersQty);
+            await redis.incrbyfloat(`hourly:hampers:${pickup_date}:${hourStr}`, requestedHampersQty);
         }
 
         throw e;
