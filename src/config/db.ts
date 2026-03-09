@@ -10,9 +10,10 @@ if (!connectionString) {
 
 export const pool = new Pool({
     connectionString,
-    max: 50, // Increase max connections due to deployment overlapping on Render
+    max: 100, // Increase max connections significantly for overlapping deployments
     idleTimeoutMillis: 10000, // Close idle connections after 10 seconds
-    connectionTimeoutMillis: 15000, // Wait max 15 seconds before failing to connect
+    connectionTimeoutMillis: 30000, // Wait max 30 seconds before failing to connect
+    statement_timeout: 30000, // Kill any query taking longer than 30 seconds to free connection
     keepAlive: true, // Prevent proxy from silently dropping connections
     ssl: { rejectUnauthorized: false }, // Required by some cloud DB platforms including Supabase
 });

@@ -4,24 +4,22 @@ import { redis } from '../utils/redis';
 
 export const getDailyQuotas = async () => {
     // DB is needed for the master 'qty' (total provisioned limit) and 'id' mappings
-    const res = await pool.query(`
-        SELECT 
-            id,
-            to_char(date, 'YYYY-MM-DD') as date,
-            qty,
-            hampers_qty
-        FROM daily_quota
-        ORDER BY date DESC
-        LIMIT 30
-    `);
+    const { data: rows, error } = await supabase
+        .from('daily_quota')
+        .select('id, date, qty, hampers_qty')
+        .order('date', { ascending: false })
+        .limit(30);
 
-    const keys = res.rows.flatMap(row => [`quota:${row.date}`, `quota:hampers:${row.date}`]);
+    if (error) throw new Error(`Supabase query failed: ${error.message}`);
+    const validRows = rows || [];
+
+    const keys = validRows.flatMap(row => [`quota:${row.date}`, `quota:hampers:${row.date}`]);
     let redisVals: (string | number | null)[] = [];
     if (keys.length > 0) {
         redisVals = await redis.mget(...keys);
     }
 
-    return res.rows.map((row, i) => {
+    return validRows.map((row, i) => {
         const qty = parseFloat(row.qty);
         const hampers_qty = parseFloat(row.hampers_qty || '0');
 
@@ -70,19 +68,16 @@ export const getDailyQuotas = async () => {
 };
 
 export const getDailyQuotaByDate = async (date: string) => {
-    const res = await pool.query(`
-        SELECT 
-            id,
-            to_char(date, 'YYYY-MM-DD') as date,
-            qty,
-            hampers_qty
-        FROM daily_quota
-        WHERE date = $1::date
-    `, [date]);
+    const { data: rows, error } = await supabase
+        .from('daily_quota')
+        .select('id, date, qty, hampers_qty')
+        .eq('date', date)
+        .limit(1);
 
-    if (res.rowCount === 0) return null;
+    if (error) throw new Error(`Supabase query failed: ${error.message}`);
+    if (!rows || rows.length === 0) return null;
 
-    const row = res.rows[0];
+    const row = rows[0];
     const qty = parseFloat(row.qty);
     const hampers_qty = parseFloat(row.hampers_qty || '0');
 

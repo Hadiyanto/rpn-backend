@@ -1,3 +1,4 @@
+import { supabase } from '../config/supabase';
 import { pool, transaction } from '../config/db';
 import { redis } from '../utils/redis';
 
@@ -10,13 +11,14 @@ export interface HourlyQuota {
 }
 
 export const getHourlyQuotas = async (): Promise<HourlyQuota[]> => {
-    const res = await pool.query(`
-        SELECT id, time_str, qty, hampers_qty, is_active
-        FROM hourly_quota
-        ORDER BY time_str ASC
-    `);
+    const { data: rows, error } = await supabase
+        .from('hourly_quota')
+        .select('id, time_str, qty, hampers_qty, is_active')
+        .order('time_str', { ascending: true });
 
-    return res.rows.map(row => ({
+    if (error) throw new Error(`Supabase query failed: ${error.message}`);
+
+    return (rows || []).map(row => ({
         ...row,
         qty: parseInt(row.qty, 10),
         hampers_qty: parseInt(row.hampers_qty || '0', 10),
@@ -25,24 +27,16 @@ export const getHourlyQuotas = async (): Promise<HourlyQuota[]> => {
 };
 
 export const getHourlyAvailability = async (date: string): Promise<(HourlyQuota & { used_qty: number, remaining_qty: number, used_hampers_qty: number, remaining_hampers_qty: number })[]> => {
-    const res = await pool.query(`
-        SELECT 
-            hq.id, 
-            hq.time_str, 
-            hq.qty, 
-            hq.hampers_qty,
-            hq.is_active,
-            COALESCE(SUM(CASE WHEN oi.box_type = 'HALF' THEN oi.qty * 0.5 WHEN oi.box_type = 'FULL' THEN oi.qty ELSE 0 END), 0) as used_qty,
-            COALESCE(SUM(CASE WHEN oi.box_type = 'HAMPERS' THEN oi.qty ELSE 0 END), 0) as used_hampers_qty
-        FROM hourly_quota hq
-        LEFT JOIN orders o ON o.pickup_date = $1 AND o.pickup_time LIKE (substring(hq.time_str, 1, 2) || '%') AND o.status != 'CANCELLED'
-        LEFT JOIN order_items oi ON oi.order_id = o.id
-        GROUP BY hq.id, hq.time_str, hq.qty, hq.hampers_qty, hq.is_active
-        ORDER BY hq.time_str ASC
-    `, [date]);
+    const { data: rows, error } = await supabase
+        .from('hourly_quota')
+        .select('id, time_str, qty, hampers_qty, is_active')
+        .order('time_str', { ascending: true });
+
+    if (error) throw new Error(`Supabase query failed: ${error.message}`);
+    if (!rows) return [];
 
     // Fetch all Redis keys at once for this date's time slots
-    const keys = res.rows.flatMap(row => [
+    const keys = rows.flatMap(row => [
         `hourly:${date}:${row.time_str}`,
         `hourly:hampers:${date}:${row.time_str}`
     ]);
@@ -52,34 +46,37 @@ export const getHourlyAvailability = async (date: string): Promise<(HourlyQuota 
         redisVals = await redis.mget(...keys);
     }
 
-    return res.rows.map((row, i) => {
+    // Check for cache miss. If ANY value is null, we must calculate from DB.
+    let hasCacheMiss = false;
+    for (const val of redisVals) {
+        if (val === null || val === undefined) {
+            hasCacheMiss = true;
+            break;
+        }
+    }
+
+    // If cache miss, calculate DB usage and save to Redis, then refetch Redis.
+    if (hasCacheMiss) {
+        await syncHourlyRedisQuota(date); // This runs the heavy PG query ONCE
+        redisVals = await redis.mget(...keys); // Refetch fresh values
+    }
+
+    return rows.map((row, i) => {
         const qty = parseFloat(row.qty);
         const hampers_qty = parseFloat(row.hampers_qty || '0');
 
-        let remaining_qty = Math.max(0, qty - parseFloat(row.used_qty));
-        let remaining_hampers_qty = Math.max(0, hampers_qty - parseFloat(row.used_hampers_qty || '0'));
+        let remaining_qty = qty;
+        let remaining_hampers_qty = hampers_qty;
 
         const rQty = redisVals[i * 2];
         const rHampersQty = redisVals[i * 2 + 1];
 
         if (rQty !== null && rQty !== undefined) {
             remaining_qty = Math.max(0, Number(rQty));
-            if (qty < remaining_qty) {
-                remaining_qty = Math.max(0, qty);
-                redis.set(`hourly:${date}:${row.time_str}`, remaining_qty).catch(console.error);
-            }
-        } else {
-            redis.set(`hourly:${date}:${row.time_str}`, remaining_qty).catch(console.error);
         }
 
         if (rHampersQty !== null && rHampersQty !== undefined) {
             remaining_hampers_qty = Math.max(0, Number(rHampersQty));
-            if (hampers_qty < remaining_hampers_qty) {
-                remaining_hampers_qty = Math.max(0, hampers_qty);
-                redis.set(`hourly:hampers:${date}:${row.time_str}`, remaining_hampers_qty).catch(console.error);
-            }
-        } else {
-            redis.set(`hourly:hampers:${date}:${row.time_str}`, remaining_hampers_qty).catch(console.error);
         }
 
         const used_qty = Math.max(0, qty - remaining_qty);
