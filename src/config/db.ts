@@ -10,7 +10,7 @@ if (!connectionString) {
 
 export const pool = new Pool({
     connectionString,
-    max: 20, // Increase max connections due to deployment overlapping
+    max: 50, // Increase max connections due to deployment overlapping on Render
     idleTimeoutMillis: 10000, // Close idle connections after 10 seconds
     connectionTimeoutMillis: 15000, // Wait max 15 seconds before failing to connect
     keepAlive: true, // Prevent proxy from silently dropping connections
