@@ -37,8 +37,9 @@ export const getDailyQuotas = async () => {
                 redis.set(`quota:${row.date}`, remaining_qty).catch(console.error);
             }
         } else {
-            // Cache warming if Redis dropped it
-            redis.set(`quota:${row.date}`, remaining_qty).catch(console.error);
+            // Cache warming if Redis dropped it. NX avoids clobbering a decrement
+            // that a concurrent createOrder() call may have just applied.
+            redis.set(`quota:${row.date}`, remaining_qty, { nx: true }).catch(console.error);
         }
 
         if (rHampersQty !== null && rHampersQty !== undefined) {
@@ -48,8 +49,8 @@ export const getDailyQuotas = async () => {
                 redis.set(`quota:hampers:${row.date}`, remaining_hampers_qty).catch(console.error);
             }
         } else {
-            // Cache warming
-            redis.set(`quota:hampers:${row.date}`, remaining_hampers_qty).catch(console.error);
+            // Cache warming (NX — see above)
+            redis.set(`quota:hampers:${row.date}`, remaining_hampers_qty, { nx: true }).catch(console.error);
         }
 
         const used_qty = Math.max(0, qty - remaining_qty);
@@ -95,7 +96,7 @@ export const getDailyQuotaByDate = async (date: string) => {
             redis.set(`quota:${date}`, remaining_qty).catch(console.error);
         }
     } else {
-        redis.set(`quota:${date}`, remaining_qty).catch(console.error);
+        redis.set(`quota:${date}`, remaining_qty, { nx: true }).catch(console.error);
     }
 
     if (rHampersQty !== null && rHampersQty !== undefined) {
@@ -105,7 +106,7 @@ export const getDailyQuotaByDate = async (date: string) => {
             redis.set(`quota:hampers:${date}`, remaining_hampers_qty).catch(console.error);
         }
     } else {
-        redis.set(`quota:hampers:${date}`, remaining_hampers_qty).catch(console.error);
+        redis.set(`quota:hampers:${date}`, remaining_hampers_qty, { nx: true }).catch(console.error);
     }
 
     const used_qty = Math.max(0, qty - remaining_qty);

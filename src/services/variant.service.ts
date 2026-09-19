@@ -13,10 +13,10 @@ export const getVariants = async () => {
     return data ?? [];
 };
 
-export const createVariant = async (variant_name: string, is_active: boolean = true) => {
+export const createVariant = async (variant_name: string, is_active: boolean = true, image_url?: string) => {
     const { data, error } = await supabase
         .from('variant')
-        .insert([{ variant_name, is_active }])
+        .insert([{ variant_name, is_active, image_url }])
         .select()
         .single();
 
@@ -24,7 +24,7 @@ export const createVariant = async (variant_name: string, is_active: boolean = t
     return data;
 };
 
-export const updateVariant = async (id: number, updates: { variant_name?: string; is_active?: boolean }) => {
+export const updateVariant = async (id: number, updates: { variant_name?: string; is_active?: boolean; image_url?: string }) => {
     const { data, error } = await supabase
         .from('variant')
         .update(updates)

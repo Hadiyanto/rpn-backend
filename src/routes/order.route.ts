@@ -174,10 +174,10 @@ router.patch('/order/:id/status', async (req, res) => {
                     }
 
                     if (canceledBox > 0) {
-                        await redis.incrby(`quota:${targetOrder.pickup_date}`, canceledBox);
+                        await redis.incrbyfloat(`quota:${targetOrder.pickup_date}`, canceledBox);
                     }
                     if (canceledHampers > 0) {
-                        await redis.incrby(`quota:hampers:${targetOrder.pickup_date}`, canceledHampers);
+                        await redis.incrbyfloat(`quota:hampers:${targetOrder.pickup_date}`, canceledHampers);
                     }
                 }
             } catch (err) {

@@ -26,11 +26,11 @@ router.get('/variants', async (req, res) => {
 
 router.post('/variants', async (req, res) => {
     try {
-        const { variant_name, is_active } = req.body;
+        const { variant_name, is_active, image_url } = req.body;
         if (!variant_name) {
             return res.status(400).json({ status: 'error', message: 'variant_name is required' });
         }
-        const data = await createVariant(variant_name, is_active);
+        const data = await createVariant(variant_name, is_active, image_url);
         await redis.del('variant_list');
         res.json({ status: 'ok', data });
     } catch (e: any) {
@@ -41,8 +41,8 @@ router.post('/variants', async (req, res) => {
 router.put('/variants/:id', async (req, res) => {
     try {
         const id = parseInt(req.params.id);
-        const { variant_name, is_active } = req.body;
-        const data = await updateVariant(id, { variant_name, is_active });
+        const { variant_name, is_active, image_url } = req.body;
+        const data = await updateVariant(id, { variant_name, is_active, image_url });
         await redis.del('variant_list');
         res.json({ status: 'ok', data });
     } catch (e: any) {
