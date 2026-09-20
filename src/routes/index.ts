@@ -18,6 +18,7 @@ import whatsappRoute from './whatsapp.route';
 import hourlyQuotaRoute from './hourlyQuota.route';
 import salaryRoute from './salary.route';
 import biteshipRoute from './biteship.route';
+import storeRoute from './store.route';
 
 const router = Router();
 
@@ -39,6 +40,7 @@ router.use(whatsappRoute);
 router.use(hourlyQuotaRoute);
 router.use(salaryRoute);
 router.use(biteshipRoute);
+router.use(storeRoute);
 
 export default router;
 

@@ -4,17 +4,20 @@ import { redis } from '../config/redis';
 
 const router = Router();
 
-router.get('/menu', async (_req, res) => {
+router.get('/menu', async (req, res) => {
     try {
         const cacheKey = 'menu_list';
-        const cachedData = await redis.get(cacheKey);
+        let data: any = await redis.get(cacheKey);
 
-        if (cachedData) {
-            return res.json({ status: 'ok', data: cachedData });
+        if (!data) {
+            data = await getMenus();
+            await redis.set(cacheKey, data, { ex: 2592000 }); // 1 month
         }
 
-        const data = await getMenus();
-        await redis.set(cacheKey, data, { ex: 2592000 }); // 1 month
+        const store_id = req.query.store_id ? Number(req.query.store_id) : undefined;
+        if (store_id) {
+            data = (data as any[]).filter(m => (m.store_ids ?? []).includes(store_id));
+        }
 
         res.json({ status: 'ok', data });
     } catch (e: any) {
@@ -39,8 +42,8 @@ router.post('/menu', async (req, res) => {
 router.put('/menu/:id', async (req, res) => {
     try {
         const id = parseInt(req.params.id);
-        const { name, price, description, is_active } = req.body;
-        const data = await updateMenu(id, { name, price, description, is_active });
+        const { name, price, description, is_active, store_ids } = req.body;
+        const data = await updateMenu(id, { name, price, description, is_active, store_ids });
         await redis.del('menu_list');
         res.json({ status: 'ok', data });
     } catch (e: any) {

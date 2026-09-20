@@ -22,7 +22,7 @@ export const createMenu = async (name: string, price: number, description?: stri
   return data;
 };
 
-export const updateMenu = async (id: number, updates: { name?: string; price?: number; description?: string; is_active?: boolean }) => {
+export const updateMenu = async (id: number, updates: { name?: string; price?: number; description?: string; is_active?: boolean; store_ids?: number[] }) => {
   const { data, error } = await supabase
     .from('menu')
     .update(updates)

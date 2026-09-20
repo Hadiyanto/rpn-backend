@@ -24,7 +24,7 @@ export const createVariant = async (variant_name: string, is_active: boolean = t
     return data;
 };
 
-export const updateVariant = async (id: number, updates: { variant_name?: string; is_active?: boolean; image_url?: string }) => {
+export const updateVariant = async (id: number, updates: { variant_name?: string; is_active?: boolean; image_url?: string; store_ids?: number[] }) => {
     const { data, error } = await supabase
         .from('variant')
         .update(updates)

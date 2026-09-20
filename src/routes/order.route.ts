@@ -8,6 +8,7 @@ import { buildNewOrderMessage, buildPaidOrderMessage, buildDoneOrderMessage, bui
 import { pool } from '../config/db';
 import { biteshipPost } from '../utils/biteship';
 import { redis } from '../utils/redis';
+import { getStoreById } from '../services/store.service';
 
 const router = Router();
 
@@ -27,17 +28,17 @@ router.post('/order', orderLimiter, async (req, res) => {
     try {
         const {
             customer_name, customer_phone, pesanan, pickup_date, pickup_time,
-            note, payment_method,
+            note, payment_method, store_id,
             delivery_method, delivery_lat, delivery_lng, delivery_address, delivery_driver_note, delivery_area_id
         } = req.body;
 
-        if (!customer_name || !customer_phone || !pesanan || !pickup_date) {
-            res.status(400).json({ status: 'error', message: 'customer_name, customer_phone, pesanan, dan pickup_date wajib diisi' });
+        if (!customer_name || !customer_phone || !pesanan || !pickup_date || !store_id) {
+            res.status(400).json({ status: 'error', message: 'customer_name, customer_phone, pesanan, pickup_date, dan store_id wajib diisi' });
             return;
         }
 
         const data = await createOrder({
-            customer_name, customer_phone, pesanan, pickup_date, pickup_time, note, payment_method,
+            customer_name, customer_phone, pesanan, pickup_date, pickup_time, note, payment_method, store_id,
             delivery_method, delivery_lat, delivery_lng, delivery_address, delivery_driver_note, delivery_area_id
         });
 
@@ -108,10 +109,11 @@ router.patch('/order/:id', async (req, res) => {
 
 router.get('/orders', async (req, res) => {
     try {
-        const { status, day } = req.query;
+        const { status, day, store_id } = req.query;
         const data = await getOrders({
             status: status as string | undefined,
             day: day as string | undefined,
+            store_id: store_id ? Number(store_id) : undefined,
         });
         res.json({ status: 'ok', data });
     } catch (e: any) {
@@ -265,16 +267,22 @@ router.patch('/order/:id/status', async (req, res) => {
                             quantity: item.qty
                         }));
 
+                        const originStore = targetOrder.store_id ? await getStoreById(targetOrder.store_id) : null;
+                        if (!originStore) {
+                            console.error(`[Biteship] Cannot create order #${targetOrder.id}: store_id is missing or store not found.`);
+                            return res.json({ status: 'ok', data }); // Still return OK for the status update itself
+                        }
+
                         const payload: Record<string, any> = {
-                            // Shipper = RPN toko
-                            shipper_contact_name: 'RPN Store',
-                            shipper_contact_phone: '081314220599',
-                            // Origin = toko
-                            origin_contact_name: 'RPN Store',
-                            origin_contact_phone: '081314220599',
-                            origin_address: 'Belakang TK Widiastuti, Jalan Rawa Jati Timur VIII, RW 08, Rawajati, Pancoran, Jakarta Selatan, DKI Jakarta 12750',
-                            origin_area_id: 'IDNP6IDNC148IDND841IDZ12750',
-                            origin_coordinate: { latitude: -6.261204, longitude: 106.854106 },
+                            // Shipper = toko asal (per store_id order ini)
+                            shipper_contact_name: originStore.name,
+                            shipper_contact_phone: originStore.phone,
+                            // Origin = toko asal
+                            origin_contact_name: originStore.name,
+                            origin_contact_phone: originStore.phone,
+                            origin_address: originStore.address,
+                            origin_area_id: originStore.area_id,
+                            origin_coordinate: { latitude: Number(originStore.latitude), longitude: Number(originStore.longitude) },
                             // Destination
                             destination_contact_name: targetOrder.customer_name,
                             destination_contact_phone: targetOrder.customer_phone,

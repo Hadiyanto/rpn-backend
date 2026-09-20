@@ -9,14 +9,17 @@ const router = Router();
 router.get('/variants', async (req, res) => {
     try {
         const cacheKey = 'variant_list';
-        const cachedData = await redis.get(cacheKey);
+        let data: any = await redis.get(cacheKey);
 
-        if (cachedData) {
-            return res.json({ status: 'ok', data: cachedData });
+        if (!data) {
+            data = await getVariants();
+            await redis.set(cacheKey, data, { ex: 2592000 }); // 1 month
         }
 
-        const data = await getVariants();
-        await redis.set(cacheKey, data, { ex: 2592000 }); // 1 month
+        const store_id = req.query.store_id ? Number(req.query.store_id) : undefined;
+        if (store_id) {
+            data = (data as any[]).filter(v => (v.store_ids ?? []).includes(store_id));
+        }
 
         res.json({ status: 'ok', data });
     } catch (e: any) {
@@ -41,8 +44,8 @@ router.post('/variants', async (req, res) => {
 router.put('/variants/:id', async (req, res) => {
     try {
         const id = parseInt(req.params.id);
-        const { variant_name, is_active, image_url } = req.body;
-        const data = await updateVariant(id, { variant_name, is_active, image_url });
+        const { variant_name, is_active, image_url, store_ids } = req.body;
+        const data = await updateVariant(id, { variant_name, is_active, image_url, store_ids });
         await redis.del('variant_list');
         res.json({ status: 'ok', data });
     } catch (e: any) {

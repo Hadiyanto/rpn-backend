@@ -1,20 +1,8 @@
 import { Router } from 'express';
 import { biteshipGet, biteshipPost } from '../utils/biteship';
+import { getStoreById } from '../services/store.service';
 
 const router = Router();
-
-/** RPN Store — origin constant for all Biteship shipments */
-const RPN_ORIGIN = {
-    contact_name: 'RPN Store',
-    contact_phone: '081314220599',
-    address: 'Belakang TK Widiastuti, Jalan Rawa Jati Timur VIII, RW 08, Rawajati, Pancoran, Jakarta Selatan, DKI Jakarta 12750',
-    area_id: 'IDNP6IDNC148IDND841IDZ12750',
-    postal_code: 12750,
-    coordinate: {
-        latitude: -6.261204,
-        longitude: 106.854106,
-    },
-} as const;
 
 /**
  * GET /api/biteship/areas?search=jakarta+selatan
@@ -44,12 +32,17 @@ router.get('/biteship/areas', async (req, res) => {
 router.post('/biteship/rates', async (req, res) => {
     try {
         const {
+            store_id,
             destination_latitude,
             destination_longitude,
             couriers = 'gosend,grab,gojek,jne,sicepat,jnt,anteraja,ide',
             items,
         } = req.body;
 
+        if (!store_id) {
+            res.status(400).json({ status: 'error', message: 'store_id wajib diisi' });
+            return;
+        }
         if (!destination_latitude || !destination_longitude) {
             res.status(400).json({ status: 'error', message: 'destination_latitude dan destination_longitude wajib diisi' });
             return;
@@ -59,9 +52,10 @@ router.post('/biteship/rates', async (req, res) => {
             return;
         }
 
+        const originStore = await getStoreById(store_id);
         const ratePayload = {
-            origin_latitude: RPN_ORIGIN.coordinate.latitude,
-            origin_longitude: RPN_ORIGIN.coordinate.longitude,
+            origin_latitude: Number(originStore.latitude),
+            origin_longitude: Number(originStore.longitude),
             destination_latitude: Number(destination_latitude),
             destination_longitude: Number(destination_longitude),
             couriers,
@@ -96,6 +90,7 @@ router.post('/biteship/rates', async (req, res) => {
 router.post('/biteship/order', async (req, res) => {
     try {
         const {
+            store_id,
             destination_contact_name,
             destination_contact_phone,
             destination_address,
@@ -112,7 +107,7 @@ router.post('/biteship/order', async (req, res) => {
         } = req.body;
 
         const required = [
-            'destination_contact_name', 'destination_contact_phone',
+            'store_id', 'destination_contact_name', 'destination_contact_phone',
             'destination_address', 'destination_area_id',
             'courier_company', 'courier_type',
         ];
@@ -126,16 +121,17 @@ router.post('/biteship/order', async (req, res) => {
             return;
         }
 
+        const originStore = await getStoreById(store_id);
         const payload: Record<string, any> = {
-            // Shipper = toko
-            shipper_contact_name: RPN_ORIGIN.contact_name,
-            shipper_contact_phone: RPN_ORIGIN.contact_phone,
-            // Origin = toko
-            origin_contact_name: RPN_ORIGIN.contact_name,
-            origin_contact_phone: RPN_ORIGIN.contact_phone,
-            origin_address: RPN_ORIGIN.address,
-            origin_area_id: RPN_ORIGIN.area_id,
-            origin_coordinate: RPN_ORIGIN.coordinate, // required for instant couriers
+            // Shipper = toko asal (per store_id)
+            shipper_contact_name: originStore.name,
+            shipper_contact_phone: originStore.phone,
+            // Origin = toko asal
+            origin_contact_name: originStore.name,
+            origin_contact_phone: originStore.phone,
+            origin_address: originStore.address,
+            origin_area_id: originStore.area_id,
+            origin_coordinate: { latitude: Number(originStore.latitude), longitude: Number(originStore.longitude) }, // required for instant couriers
             // Destination
             destination_contact_name,
             destination_contact_phone,

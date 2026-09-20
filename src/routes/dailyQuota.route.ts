@@ -11,12 +11,16 @@ const router = Router();
 
 router.get('/daily-quota', async (req, res) => {
     try {
+        const store_id = Number(req.query.store_id);
+        if (!store_id) {
+            return res.status(400).json({ status: 'error', message: 'store_id is required' });
+        }
         const date = req.query.date as string;
         if (date) {
-            const data = await getDailyQuotaByDate(date);
+            const data = await getDailyQuotaByDate(date, store_id);
             return res.json({ status: 'ok', data });
         }
-        const data = await getDailyQuotas();
+        const data = await getDailyQuotas(store_id);
         res.json({ status: 'ok', data });
     } catch (e: any) {
         const msg = e?.message || e?.details || JSON.stringify(e) || 'Unknown error';
@@ -27,11 +31,11 @@ router.get('/daily-quota', async (req, res) => {
 
 router.post('/daily-quota', async (req, res) => {
     try {
-        const { date, qty, hampers_qty } = req.body;
-        if (!date || qty === undefined) {
-            return res.status(400).json({ status: 'error', message: 'date and qty are required' });
+        const { date, qty, hampers_qty, store_id } = req.body;
+        if (!date || qty === undefined || !store_id) {
+            return res.status(400).json({ status: 'error', message: 'date, qty, and store_id are required' });
         }
-        const data = await createDailyQuota(date, qty, hampers_qty || 0);
+        const data = await createDailyQuota(date, qty, store_id, hampers_qty || 0);
         res.json({ status: 'ok', data });
     } catch (e: any) {
         if (e.code === '23505') { // Unique constraint violation
