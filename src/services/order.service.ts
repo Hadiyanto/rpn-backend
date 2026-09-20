@@ -100,6 +100,14 @@ export const createOrder = async (payload: CreateOrderPayload) => {
         if (pickup_time) {
             hourStr = pickup_time.split(':')[0] + ':00';
 
+            // Server-side floor check against the store's opening hour. The frontend
+            // already disables hours before this, but don't rely solely on client-side filtering.
+            const storeRes = await pool.query('SELECT open_time FROM stores WHERE id = $1', [store_id]);
+            const openTime = storeRes.rows[0]?.open_time;
+            if (openTime && hourStr < openTime) {
+                throw new Error(`MOHON MAAF: Toko baru buka jam ${openTime}. Silakan pilih jam lain.`);
+            }
+
             // Fetch base capacity and active status from DB
             const hourlyRes = await pool.query(`
                 SELECT qty, hampers_qty
@@ -107,73 +115,74 @@ export const createOrder = async (payload: CreateOrderPayload) => {
                 WHERE store_id = $1 AND time_str = $2 AND is_active = true
             `, [store_id, hourStr]);
 
-            if (!hourlyRes.rowCount || hourlyRes.rowCount === 0) {
-                throw new Error(`MOHON MAAF: Jam pickup ${hourStr} belum dibuka atau sudah ditutup. Silakan pilih jam lain.`);
-            }
-            const maxHourly = parseFloat(hourlyRes.rows[0].qty);
-            const maxHourlyHampers = parseFloat(hourlyRes.rows[0].hampers_qty || '0');
+            // If no hourly quota is configured for this slot, skip hourly-specific
+            // validation entirely — the daily quota check above is the only cap that applies.
+            if (hourlyRes.rowCount && hourlyRes.rowCount > 0) {
+                const maxHourly = parseFloat(hourlyRes.rows[0].qty);
+                const maxHourlyHampers = parseFloat(hourlyRes.rows[0].hampers_qty || '0');
 
-            // Warm up Redis Hourly Cache if it doesn't exist.
-            // Uses SET NX so that if two requests race on a cold cache, only the first
-            // SET actually lands — the loser's SET becomes a no-op instead of clobbering
-            // a decrement the winner may have already applied.
-            const [rHourlyBox, rHourlyHampers] = await redis.mget(
-                `hourly:${store_id}:${pickup_date}:${hourStr}`,
-                `hourly:hampers:${store_id}:${pickup_date}:${hourStr}`
-            );
+                // Warm up Redis Hourly Cache if it doesn't exist.
+                // Uses SET NX so that if two requests race on a cold cache, only the first
+                // SET actually lands — the loser's SET becomes a no-op instead of clobbering
+                // a decrement the winner may have already applied.
+                const [rHourlyBox, rHourlyHampers] = await redis.mget(
+                    `hourly:${store_id}:${pickup_date}:${hourStr}`,
+                    `hourly:hampers:${store_id}:${pickup_date}:${hourStr}`
+                );
 
-            if (rHourlyBox === null) {
-                const usedHourlyRes = await pool.query(`
-                    SELECT
-                        COALESCE(SUM(CASE WHEN oi.box_type = 'HALF' THEN oi.qty * 0.5 WHEN oi.box_type = 'FULL' THEN oi.qty ELSE 0 END), 0) as used_box
-                    FROM order_items oi
-                    JOIN orders o ON oi.order_id = o.id
-                    WHERE o.pickup_date = $1
-                    AND o.store_id = $2
-                    AND o.pickup_time LIKE $3
-                    AND o.status != 'CANCELLED'
-                `, [pickup_date, store_id, `${pickup_time.split(':')[0]}:%`]);
-                const usedHourlyBox = parseFloat(usedHourlyRes.rows[0].used_box);
-                await redis.set(`hourly:${store_id}:${pickup_date}:${hourStr}`, Math.max(0, maxHourly - usedHourlyBox), { nx: true });
-            }
-
-            if (rHourlyHampers === null) {
-                const usedHourlyRes = await pool.query(`
-                    SELECT
-                        COALESCE(SUM(CASE WHEN oi.box_type = 'HAMPERS' THEN oi.qty ELSE 0 END), 0) as used_hampers
-                    FROM order_items oi
-                    JOIN orders o ON oi.order_id = o.id
-                    WHERE o.pickup_date = $1
-                    AND o.store_id = $2
-                    AND o.pickup_time LIKE $3
-                    AND o.status != 'CANCELLED'
-                `, [pickup_date, store_id, `${pickup_time.split(':')[0]}:%`]);
-                const usedHourlyHampers = parseFloat(usedHourlyRes.rows[0].used_hampers);
-                await redis.set(`hourly:hampers:${store_id}:${pickup_date}:${hourStr}`, Math.max(0, maxHourlyHampers - usedHourlyHampers), { nx: true });
-            }
-
-            // Perform Atomic Decrements for Hourly
-            if (requestedBoxQty > 0) {
-                const remainingHourlyBoxStr = await redis.incrbyfloat(`hourly:${store_id}:${pickup_date}:${hourStr}`, -requestedBoxQty);
-                const remainingHourlyBox = parseFloat(remainingHourlyBoxStr as unknown as string);
-                if (remainingHourlyBox < 0) {
-                    await redis.incrbyfloat(`hourly:${store_id}:${pickup_date}:${hourStr}`, requestedBoxQty);
-                    throw new Error(`MOHON MAAF: Kuota Jam ${hourStr} di tanggal ${pickup_date} sudah penuh. Silakan pilih jam lain.`);
+                if (rHourlyBox === null) {
+                    const usedHourlyRes = await pool.query(`
+                        SELECT
+                            COALESCE(SUM(CASE WHEN oi.box_type = 'HALF' THEN oi.qty * 0.5 WHEN oi.box_type = 'FULL' THEN oi.qty ELSE 0 END), 0) as used_box
+                        FROM order_items oi
+                        JOIN orders o ON oi.order_id = o.id
+                        WHERE o.pickup_date = $1
+                        AND o.store_id = $2
+                        AND o.pickup_time LIKE $3
+                        AND o.status != 'CANCELLED'
+                    `, [pickup_date, store_id, `${pickup_time.split(':')[0]}:%`]);
+                    const usedHourlyBox = parseFloat(usedHourlyRes.rows[0].used_box);
+                    await redis.set(`hourly:${store_id}:${pickup_date}:${hourStr}`, Math.max(0, maxHourly - usedHourlyBox), { nx: true });
                 }
-                reservedHourlyBox = true;
-            }
 
-            if (requestedHampersQty > 0) {
-                const remainingHourlyHampersStr = await redis.incrbyfloat(`hourly:hampers:${store_id}:${pickup_date}:${hourStr}`, -requestedHampersQty);
-                const remainingHourlyHampers = parseFloat(remainingHourlyHampersStr as unknown as string);
-                if (remainingHourlyHampers < 0) {
-                    await redis.incrbyfloat(`hourly:hampers:${store_id}:${pickup_date}:${hourStr}`, requestedHampersQty);
-                    if (reservedHourlyBox) {
+                if (rHourlyHampers === null) {
+                    const usedHourlyRes = await pool.query(`
+                        SELECT
+                            COALESCE(SUM(CASE WHEN oi.box_type = 'HAMPERS' THEN oi.qty ELSE 0 END), 0) as used_hampers
+                        FROM order_items oi
+                        JOIN orders o ON oi.order_id = o.id
+                        WHERE o.pickup_date = $1
+                        AND o.store_id = $2
+                        AND o.pickup_time LIKE $3
+                        AND o.status != 'CANCELLED'
+                    `, [pickup_date, store_id, `${pickup_time.split(':')[0]}:%`]);
+                    const usedHourlyHampers = parseFloat(usedHourlyRes.rows[0].used_hampers);
+                    await redis.set(`hourly:hampers:${store_id}:${pickup_date}:${hourStr}`, Math.max(0, maxHourlyHampers - usedHourlyHampers), { nx: true });
+                }
+
+                // Perform Atomic Decrements for Hourly
+                if (requestedBoxQty > 0) {
+                    const remainingHourlyBoxStr = await redis.incrbyfloat(`hourly:${store_id}:${pickup_date}:${hourStr}`, -requestedBoxQty);
+                    const remainingHourlyBox = parseFloat(remainingHourlyBoxStr as unknown as string);
+                    if (remainingHourlyBox < 0) {
                         await redis.incrbyfloat(`hourly:${store_id}:${pickup_date}:${hourStr}`, requestedBoxQty);
+                        throw new Error(`MOHON MAAF: Kuota Jam ${hourStr} di tanggal ${pickup_date} sudah penuh. Silakan pilih jam lain.`);
                     }
-                    throw new Error(`MOHON MAAF: Kuota Jam Hampers ${hourStr} di tanggal ${pickup_date} sudah penuh. Silakan pilih jam lain.`);
+                    reservedHourlyBox = true;
                 }
-                reservedHourlyHampers = true;
+
+                if (requestedHampersQty > 0) {
+                    const remainingHourlyHampersStr = await redis.incrbyfloat(`hourly:hampers:${store_id}:${pickup_date}:${hourStr}`, -requestedHampersQty);
+                    const remainingHourlyHampers = parseFloat(remainingHourlyHampersStr as unknown as string);
+                    if (remainingHourlyHampers < 0) {
+                        await redis.incrbyfloat(`hourly:hampers:${store_id}:${pickup_date}:${hourStr}`, requestedHampersQty);
+                        if (reservedHourlyBox) {
+                            await redis.incrbyfloat(`hourly:${store_id}:${pickup_date}:${hourStr}`, requestedBoxQty);
+                        }
+                        throw new Error(`MOHON MAAF: Kuota Jam Hampers ${hourStr} di tanggal ${pickup_date} sudah penuh. Silakan pilih jam lain.`);
+                    }
+                    reservedHourlyHampers = true;
+                }
             }
         }
 

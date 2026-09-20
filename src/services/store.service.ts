@@ -30,6 +30,7 @@ export interface UpdateStorePayload {
     longitude?: number;
     phone?: string | null;
     is_active?: boolean;
+    open_time?: string;
 }
 
 export const updateStore = async (id: number, payload: UpdateStorePayload) => {

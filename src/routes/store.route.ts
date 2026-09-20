@@ -33,8 +33,8 @@ router.put('/stores/:id', async (req, res) => {
             res.status(400).json({ status: 'error', message: 'id tidak valid' });
             return;
         }
-        const { name, address, area_id, latitude, longitude, phone, is_active } = req.body;
-        const data = await updateStore(id, { name, address, area_id, latitude, longitude, phone, is_active });
+        const { name, address, area_id, latitude, longitude, phone, is_active, open_time } = req.body;
+        const data = await updateStore(id, { name, address, area_id, latitude, longitude, phone, is_active, open_time });
         res.json({ status: 'ok', data });
     } catch (e: any) {
         res.status(400).json({ status: 'error', message: e.message });
