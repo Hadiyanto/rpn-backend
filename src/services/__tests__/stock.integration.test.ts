@@ -111,6 +111,20 @@ describe.skipIf(!hasTestDb)('stock & recipe services (local Postgres)', () => {
         expect(history.find(h => Number(h.qty_change) === 5000)?.total_price).toBe(700000);
     });
 
+    it('edit/delete stock items: blocked while a recipe uses them', async () => {
+        const tepung = await stock.createStock({ item_name: 'Tepung', unit: 'gram', store_id: 1 });
+        expect((await stock.updateStock(tepung.id, { item_name: 'Tepung Terigu' })).item_name).toBe('Tepung Terigu');
+
+        await recipe.replaceVariantRecipe(1, 1, [{ stock_id: tepung.id, qty_gram: 50 }]);
+        await expect(stock.updateStock(tepung.id, { unit: 'kg' })).rejects.toMatchObject({ status: 409 });
+        await expect(stock.deleteStock(tepung.id)).rejects.toMatchObject({ status: 409 });
+
+        await recipe.replaceVariantRecipe(1, 1, []);
+        expect((await stock.updateStock(tepung.id, { unit: 'kg' })).unit).toBe('kg');
+        await stock.deleteStock(tepung.id);
+        await expect(stock.deleteStock(tepung.id)).rejects.toMatchObject({ status: 404 });
+    });
+
     it('variant components: rules and exposure via getVariants / catalog', async () => {
         await expect(recipe.replaceVariantComponents(4, [4])).rejects.toThrow(/dirinya sendiri/);
         await recipe.replaceVariantComponents(4, [1, 2, 3]);

@@ -145,3 +145,6 @@ vite.config.ts.timestamp-*
 
 # WhatsApp (Baileys) local session files
 whatsapp-session/
+
+# Local database backups (scripts/backup-csv.ts, pg_dump)
+backups/

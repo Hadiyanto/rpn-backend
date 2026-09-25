@@ -25,7 +25,7 @@ Legenda: ⏳ belum · 🔄 sedang · ✅ selesai · ⚠️ selesai dengan catata
 
 ## Masih perlu keputusan / tindakan user
 1. **K4:** maks rasa FULL box 2 atau 3? Seed-nya 3; bisa diubah di `/config` → kartu menu → "Maks rasa".
-2. **`/pesan`** rusak sejak multi-store (semua request-nya tanpa `store_id`) dan tidak ada di Sidebar. Hapus, atau perbaiki (tambah pilihan store)?
+2. ~~`/pesan`~~ **dihapus.** Halaman ini memang sudah di-redirect ke `/` lewat `next.config.js`, dan redirect-nya dipertahankan untuk link lama.
 3. **Deploy + migration** tiap fase (kolom "Deploy/DB"), termasuk script Redis (`cleanup-hampers-redis`, `resync-quotas`) dan **aktivasi RLS** (Fase 10).
 4. Perubahan **belum di-commit** di kedua repo (branch `main`).
 
@@ -39,6 +39,16 @@ Legenda: ⏳ belum · 🔄 sedang · ✅ selesai · ⚠️ selesai dengan catata
 - `rpn-backend`: `tsc --noEmit` bersih.
 - `rpn-frontend`: `tsc --noEmit` bersih; `eslint .` ada 205 masalah (59 error, 146 warning). Target: jumlah ini tidak bertambah. (Setelah Fase 04: 199.)
 - Kedua repo berada di branch `main` tanpa perubahan lokal. Perubahan dari fase-fase ini **belum di-commit**.
+
+## Opsi: mulai dengan data bersih
+Script sudah disiapkan dan diuji di salinan DB lokal; **belum dijalankan ke produksi**.
+1. Backup (hanya membaca): `npx ts-node scripts/backup-csv.ts` dan `pg_dump "$DATABASE_URL" -Fc -f backups/rpn-before-clear.dump`. Hasilnya di `rpn-backend/backups/` (gitignored).
+2. `npm run migrate up`, lalu deploy (lihat urutan di bawah).
+3. `psql "$DATABASE_URL" -f scripts/clear-data.sql` mengosongkan order, stok + resep, keuangan/POS, gaji harian, kuota, dan konfigurasi gaji dalam satu transaksi.
+   - **Dipertahankan:** auth.users, user_roles, push_subscriptions, pgmigrations, health, stores, menu, variant, variant_components. Store, menu, dan varian tidak punya form "buat baru" di UI.
+   - Tanpa `CASCADE` (gagal daripada ikut menghapus tabel lain) dan tanpa `RESTART IDENTITY` (id order tidak dipakai ulang, jadi link WA lama tidak pernah membuka order baru).
+4. `npx ts-node scripts/clear-quota-redis.ts --dry-run`, lalu jalankan tanpa `--dry-run`. Script `cleanup-hampers-redis` dan `resync-quotas` tidak diperlukan lagi setelah langkah ini.
+5. Isi ulang lewat UI: kuota di `/config`, konfigurasi gaji di `/config/salary`, bahan di `/stock`, dan resep di `/config` → Resep.
 
 ## Urutan deploy kalau beberapa fase dirilis sekaligus
 Migration bersifat berurutan, jadi `npm run migrate up` selalu menjalankan semua yang belum jalan.

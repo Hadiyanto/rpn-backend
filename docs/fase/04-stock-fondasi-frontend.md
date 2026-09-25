@@ -28,6 +28,13 @@
 - [x] `config/db.ts`: parser `TIMESTAMP` mengembalikan string format supabase-js (`YYYY-MM-DDTHH:mm:ss…`), supaya tampilan waktu di frontend tidak bergeser.
 - [x] Item tanpa `variant_ids` tetap diterima (G7).
 
+## Tambahan: celah UI yang ditutup setelah review
+- [x] Backend: `PUT /stocks/:id` (nama/satuan) dan `DELETE /stocks/:id`. Keduanya ditolak dengan 409 kalau bahan masih dipakai resep (ganti satuan dari gram, atau hapus). Ada integration test-nya.
+- [x] `/stock`: ikon pensil di tiap bahan membuka modal **Edit Bahan** (ubah nama/satuan dan tombol **Hapus Bahan**).
+- [x] `/stock/[id]/history`: badge **Otomatis · Order #id** untuk mutasi dari order, dan **Beli Rp … · Rp …/unit** untuk stok masuk yang punya harga.
+- [x] `/orders` → detail order: tampilan **Pengiriman Biteship** (`biteship_order_id`) dan tombol **Hitung ulang** stok (`POST /order/:id/recalculate-stock`).
+- [x] `npm run test:db` 110 lulus; frontend `tsc` bersih, lint 197, build sukses.
+
 ## Verifikasi
 - [x] Integration test `src/services/__tests__/order.integration.test.ts` (6 test, Postgres lokal + Redis palsu in-memory):
   - `variant_ids` tersimpan dan terbaca kembali; `pickup_date` berupa string;

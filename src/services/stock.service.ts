@@ -1,5 +1,7 @@
 import { pool, transaction } from '../config/db';
 import { ValidationError } from '../utils/validation';
+import { ConflictError, NotFoundError } from '../utils/errors';
+import { isGramUnit } from './variantRecipe.service';
 
 export type StockMovementType = 'IN' | 'OUT' | 'ADJUSTMENT';
 
@@ -42,6 +44,47 @@ export const createStock = async (payload: CreateStockDTO) => {
         }
         return stock;
     });
+};
+
+/** Rename an item or change its unit. A unit change away from gram is refused while recipes use it. */
+export const updateStock = async (id: number, payload: { item_name?: unknown; unit?: unknown }) => {
+    const item_name = payload.item_name === undefined ? undefined : String(payload.item_name).trim();
+    const unit = payload.unit === undefined ? undefined : String(payload.unit).trim();
+    if (item_name !== undefined && !item_name) throw new ValidationError('item_name tidak boleh kosong');
+    if (unit !== undefined && !unit) throw new ValidationError('unit tidak boleh kosong');
+
+    return transaction(async (client) => {
+        const { rows: [current] } = await client.query('SELECT * FROM stock WHERE id = $1 FOR UPDATE', [id]);
+        if (!current) throw new NotFoundError(`Stock dengan id ${id} tidak ditemukan`);
+
+        if (unit !== undefined && !isGramUnit(unit)) {
+            const { rowCount } = await client.query('SELECT 1 FROM variant_recipe WHERE stock_id = $1 LIMIT 1', [id]);
+            if (rowCount) throw new ConflictError('Bahan ini dipakai di resep, satuannya harus tetap gram');
+        }
+
+        const { rows: [updated] } = await client.query(
+            `UPDATE stock SET item_name = COALESCE($2, item_name), unit = COALESCE($3, unit), updated_at = CURRENT_TIMESTAMP
+             WHERE id = $1 RETURNING *`,
+            [id, item_name ?? null, unit ?? null]
+        );
+        return updated;
+    });
+};
+
+/** Delete an item (its history goes with it). Refused while a recipe still uses it. */
+export const deleteStock = async (id: number) => {
+    const { rows } = await pool.query(`
+        SELECT DISTINCT v.variant_name
+        FROM variant_recipe vr JOIN variant v ON v.id = vr.variant_id
+        WHERE vr.stock_id = $1
+        ORDER BY v.variant_name
+    `, [id]);
+    if (rows.length > 0) {
+        throw new ConflictError(`Bahan masih dipakai di resep: ${rows.map(r => r.variant_name).join(', ')}. Hapus dari resep dulu.`);
+    }
+    const { rowCount } = await pool.query('DELETE FROM stock WHERE id = $1', [id]);
+    if (!rowCount) throw new NotFoundError(`Stock dengan id ${id} tidak ditemukan`);
+    return true;
 };
 
 export interface AdjustStockDTO {

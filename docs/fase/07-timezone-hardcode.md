@@ -31,6 +31,12 @@
   - Konstanta origin hardcode (termasuk nomor telepon `08561234567`) dihapus; origin diambil dari data store oleh backend.
 - [x] `utils/config.ts` sekarang hanya berisi `API_URL`. `ORIGIN_AREA_ID`, `STORE_NAME`, dan `BCA_ACCOUNT_*` dihapus.
 
+- [x] **Perbaikan susulan (setelah laporan error "Parameter date dan store_id dibutuhkan"):** form tambah/edit order di `app/orders/page.tsx` juga tidak mengirim `store_id` sejak versi multi-store. Kuota harian, `hourly-quota/availability`, dan `POST /api/order` semuanya ditolak 400. Perbaikannya:
+  - `form.store_id`: order baru default ke filter store yang aktif (atau store pertama); saat edit diambil dari order dan pilihan store dikunci.
+  - Pilihan "Store" muncul di form kalau store lebih dari satu. Mengganti store mereset jam.
+  - Kuota harian dan per jam diambil per `form.store_id`, dan `store_id` ikut dikirim saat create.
+  - Frontend: `tsc` bersih, lint 197, build sukses.
+
 ## Verifikasi
 - [x] `src/utils/__tests__/date.test.ts` (3 test): 23:30 UTC = besok di WIB; hari dari tanggal; "Senin, 2 Maret 2026".
 - [x] Integration test `getMenuPriceMap` (aktif saja vs semua termasuk HAMPERS).
