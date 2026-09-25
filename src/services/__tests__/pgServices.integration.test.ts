@@ -111,7 +111,8 @@ describe.skipIf(!hasTestDb)('services on pg (shape parity & behaviour)', () => {
 
         const variant = await import('../variant.service');
         const v = await variant.createVariant({ variant_name: 'Keju' });
-        expect((await variant.updateVariant(v.id, { store_ids: [1] })).store_ids).toEqual([1]);
+        expect((await variant.updateVariant(v.id, { image_url: 'https://res.cloudinary.com/x.jpg' })).image_url).toContain('cloudinary');
+        await expect(variant.updateVariant(v.id, { store_ids: [1] })).rejects.toMatchObject({ status: 409 }); // no recipe yet
 
         const store = await import('../store.service');
         const stores = await store.getStores();

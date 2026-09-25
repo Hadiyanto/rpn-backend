@@ -1,5 +1,7 @@
 import { Router } from 'express';
 import { sendError } from '../utils/errors';
+import { redis } from '../config/redis';
+import { VARIANT_CACHE_KEY } from './variant.route';
 import {
     getVariantRecipes,
     replaceVariantRecipe,
@@ -39,9 +41,10 @@ router.get('/variant-recipe/suggestions', async (_req, res) => {
 // POST /variant-recipe/copy  { from_store_id, to_store_id, variant_ids? }
 router.post('/variant-recipe/copy', async (req, res) => {
     try {
-        const { from_store_id, to_store_id, variant_ids } = req.body ?? {};
+        const { from_store_id, to_store_id, variant_ids, make_available } = req.body ?? {};
         const ids = variant_ids === undefined || variant_ids === null ? undefined : Array.isArray(variant_ids) ? variant_ids.map(Number) : [NaN];
-        const data = await copyVariantRecipes(Number(from_store_id), Number(to_store_id), ids);
+        const data = await copyVariantRecipes(Number(from_store_id), Number(to_store_id), ids, make_available === true);
+        await redis.del(VARIANT_CACHE_KEY); // availability / recipe coverage changed
         res.json({ status: 'ok', data });
     } catch (e: any) {
         sendError(res, e);
@@ -53,6 +56,7 @@ router.put('/variant-recipe', async (req, res) => {
     try {
         const { variant_id, store_id, items } = req.body;
         const data = await replaceVariantRecipe(Number(variant_id), Number(store_id), items);
+        await redis.del(VARIANT_CACHE_KEY); // recipe coverage (and maybe availability) changed
         res.json({ status: 'ok', data });
     } catch (e: any) {
         sendError(res, e);
@@ -62,6 +66,7 @@ router.put('/variant-recipe', async (req, res) => {
 router.delete('/variant-recipe/:id', async (req, res) => {
     try {
         await deleteVariantRecipeLine(Number(req.params.id));
+        await redis.del(VARIANT_CACHE_KEY);
         res.json({ status: 'ok' });
     } catch (e: any) {
         sendError(res, e);

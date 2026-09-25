@@ -9,9 +9,33 @@ export interface VariantInput {
     store_ids?: number[];
 }
 
+/** All flavors, each with `recipe_store_ids`: the stores that have a recipe for it. */
 export const getVariants = async () => {
-    const { rows } = await pool.query('SELECT * FROM variant ORDER BY is_active DESC, id');
+    const { rows } = await pool.query(`
+        SELECT v.*,
+               COALESCE((SELECT array_agg(DISTINCT vr.store_id ORDER BY vr.store_id) FROM variant_recipe vr WHERE vr.variant_id = v.id), '{}') AS recipe_store_ids
+        FROM variant v
+        ORDER BY v.is_active DESC, v.id
+    `);
     return rows;
+};
+
+/**
+ * A flavor can only be sold at a store that has its recipe (otherwise its stock can't be
+ * deducted). Throws 409 naming the stores that still need a recipe.
+ */
+const assertStoresHaveRecipe = async (variantId: number | null, storeIds: number[]) => {
+    if (storeIds.length === 0) return;
+    const { rows } = await pool.query(`
+        SELECT s.id, s.name
+        FROM stores s
+        WHERE s.id = ANY($1::int[])
+          AND NOT EXISTS (SELECT 1 FROM variant_recipe vr WHERE vr.store_id = s.id AND vr.variant_id = $2)
+        ORDER BY s.id
+    `, [storeIds, variantId ?? 0]);
+    if (rows.length > 0) {
+        throw new ConflictError(`Belum ada resep rasa ini di ${rows.map(r => r.name).join(', ')}. Buat atau salin resepnya dulu.`);
+    }
 };
 
 const validateVariantFields = async (input: VariantInput, excludeId?: number) => {
@@ -39,13 +63,18 @@ const validateVariantFields = async (input: VariantInput, excludeId?: number) =>
     return out;
 };
 
+/** New flavors start unsold everywhere: they become available per store once that store has their recipe. */
 export const createVariant = async (input: VariantInput) => {
     if (input.variant_name === undefined) throw new ValidationError('Nama rasa wajib diisi');
-    return insertRow('variant', { is_active: true, ...(await validateVariantFields(input)) });
+    const fields = await validateVariantFields(input);
+    await assertStoresHaveRecipe(null, (fields.store_ids as number[] | undefined) ?? []);
+    return insertRow('variant', { is_active: true, store_ids: [], ...fields });
 };
 
 export const updateVariant = async (id: number, updates: VariantInput) => {
-    const data = await updateRowById('variant', id, await validateVariantFields(updates, id));
+    const fields = await validateVariantFields(updates, id);
+    if (fields.store_ids) await assertStoresHaveRecipe(id, fields.store_ids as number[]);
+    const data = await updateRowById('variant', id, fields);
     if (!data) throw new NotFoundError(`Variant dengan id ${id} tidak ditemukan`);
     return data;
 };

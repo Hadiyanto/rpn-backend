@@ -40,15 +40,21 @@ Legenda: ⏳ belum · 🔄 sedang · ✅ selesai · ⚠️ selesai dengan catata
 - `rpn-frontend`: `tsc --noEmit` bersih; `eslint .` ada 205 masalah (59 error, 146 warning). Target: jumlah ini tidak bertambah. (Setelah Fase 04: 199.)
 - Kedua repo berada di branch `main` tanpa perubahan lokal. Perubahan dari fase-fase ini **belum di-commit**.
 
-## Opsi: mulai dengan data bersih
-Script sudah disiapkan dan diuji di salinan DB lokal; **belum dijalankan ke produksi**.
-1. Backup (hanya membaca): `npx ts-node scripts/backup-csv.ts` dan `pg_dump "$DATABASE_URL" -Fc -f backups/rpn-before-clear.dump`. Hasilnya di `rpn-backend/backups/` (gitignored).
-2. `npm run migrate up`, lalu deploy (lihat urutan di bawah).
-3. `psql "$DATABASE_URL" -f scripts/clear-data.sql` mengosongkan order, stok + resep, keuangan/POS, gaji harian, kuota, dan konfigurasi gaji dalam satu transaksi.
-   - **Dipertahankan:** auth.users, user_roles, push_subscriptions, pgmigrations, health, stores, menu, variant, variant_components. Store, menu, dan varian tidak punya form "buat baru" di UI.
-   - Tanpa `CASCADE` (gagal daripada ikut menghapus tabel lain) dan tanpa `RESTART IDENTITY` (id order tidak dipakai ulang, jadi link WA lama tidak pernah membuka order baru).
-4. `npx ts-node scripts/clear-quota-redis.ts --dry-run`, lalu jalankan tanpa `--dry-run`. Script `cleanup-hampers-redis` dan `resync-quotas` tidak diperlukan lagi setelah langkah ini.
-5. Isi ulang lewat UI: kuota di `/config`, konfigurasi gaji di `/config/salary`, bahan di `/stock`, dan resep di `/config` → Resep.
+## Pembersihan data produksi (dijalankan 2026-09-25)
+Atas permintaan user, **semua data operasional dan master (kecuali store dan user) sudah dikosongkan di produksi**, supaya setup bisa dimulai dari nol.
+- **Backup (terverifikasi):** `rpn-backend/backups/rpn-before-clear-<waktu>.dump` (pg_dump, schema public; sudah dicoba di-restore ke DB lokal dan jumlah barisnya cocok) dan CSV per tabel di `rpn-backend/backups/2026-09-25T14-51-12/`. Folder ini gitignored, jadi **salin ke tempat aman**.
+- **Dikosongkan** (satu transaksi, tanpa CASCADE, tanpa RESTART IDENTITY):
+  - orders (233), order_items (377)
+  - variant (20), menu (3)
+  - stock (15), stock_history (9)
+  - pengeluaran (40), salary_config (5), daily_salary (3)
+  - daily_quota (11), hourly_quota (6)
+  - Ikut dikosongkan karena FK (semuanya 0 baris): order_item_variants, variant_recipe, variant_components.
+- **Dipertahankan:** stores (2), user_roles (3), push_subscriptions (1), capital (0), debt (0), health, pgmigrations.
+- **Redis:** cache `menu_list` / `variant_list` dihapus (`scripts/clear-quota-redis.ts --caches`). Tidak ada counter kuota yang tersisa. Sesi WhatsApp tidak disentuh.
+- **Temuan:** tabel `penjualan` dan `transactions` **tidak ada** di produksi, walaupun dibuat di migration awal, jadi endpoint POS (`/transactions`, `/penjualan`) akan error di produksi. Semua migration sampai `1789842084778` sudah tercatat jalan.
+- Langkah "cleanup-hampers-redis" dan "resync-quotas" di fase 00/02 **tidak diperlukan lagi**. `cleanup-hampers-redis.ts` sudah dihapus karena polanya tanpa namespace dan berbahaya di instance Redis bersama.
+- **Restore darurat:** `pg_restore -d "$DATABASE_URL" --data-only --no-owner <file.dump>` (ke tabel yang sudah kosong).
 
 ## Urutan deploy kalau beberapa fase dirilis sekaligus
 Migration bersifat berurutan, jadi `npm run migrate up` selalu menjalankan semua yang belum jalan.
@@ -63,3 +69,16 @@ Migration bersifat berurutan, jadi `npm run migrate up` selalu menjalankan semua
   psql rpn_migration_test -c "CREATE SCHEMA auth; CREATE TABLE auth.users (id uuid PRIMARY KEY, email text);"
   DATABASE_URL=postgres://localhost/rpn_migration_test node node_modules/.bin/node-pg-migrate up
   ```
+
+
+## Penamaan key Redis (2026-09-26)
+- Hasil scan produksi (hanya membaca): Redis **dipakai bersama aplikasi lain** (`resident:*` 43 key, `testdoc:*` 1 key). Key RPN yang ada hanya sesi WhatsApp (`rpn-wa-session:*`, 9 key). Tidak ada key kuota atau cache, sesuai DB yang sudah dikosongkan.
+- Semua key RPN kini di bawah namespace **`rpn:`** dan dibangun di `src/utils/redisKeys.ts`:
+  - `rpn:quota:daily:{store}:{tanggal}` (dulu `quota:{store}:{tanggal}`)
+  - `rpn:quota:hourly:{store}:{tanggal}:{HH}` (dulu `hourly:{store}:{tanggal}:{HH:00}`)
+  - `rpn:cache:menu:v1` (dulu `menu_list:v3`), `rpn:cache:variants:v1` (dulu `variant_list:v4`)
+  - `rpn:wa:main:{jenis}` (dulu `rpn-wa-session:{jenis}`)
+- **Sesi WhatsApp tidak ter-logout:** saat backend baru pertama menyala, key `rpn-wa-session:*` dipindah ke `rpn:wa:main:*` dengan `RENAMENX` (atomik, tidak menimpa, aman dijalankan ulang). `KEYS` diganti `SCAN`.
+- Script: `clear-quota-redis.ts` hanya menyentuh `rpn:quota:*` / `rpn:cache:*`. `cleanup-hampers-redis.ts` dihapus.
+- Test: **120 lulus** (termasuk unit test nama key dan test migrasi sesi WA dengan Redis palsu: key aplikasi lain tidak tersentuh, key basi tidak menimpa yang baru).
+- **Saat deploy:** Render menjalankan instance lama dan baru bersamaan sebentar. Instance lama masih menulis ke `rpn-wa-session:*` sampai dimatikan. Key basi itu akan dibersihkan (tidak menimpa) pada start berikutnya. Kalau WA sempat terputus setelah deploy, cukup scan QR ulang.

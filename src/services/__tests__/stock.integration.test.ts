@@ -145,6 +145,32 @@ describe.skipIf(!hasTestDb)('stock & recipe services (local Postgres)', () => {
         await expect(recipe.copyVariantRecipes(2, 1, [3])).rejects.toThrow(/Belum ada resep/);
     });
 
+    it('a flavor is only sellable where it has a recipe; emptying the recipe stops selling it', async () => {
+        const variant = await import('../variant.service');
+        const coklat = await stock.createStock({ item_name: 'Cokelat', unit: 'gram', store_id: 1 });
+        await expect(variant.updateVariant(1, { store_ids: [1] })).rejects.toThrow(/Belum ada resep rasa ini di RPN Store Pancoran/);
+
+        await recipe.replaceVariantRecipe(1, 1, [{ stock_id: coklat.id, qty_gram: 100 }]);
+        expect((await variant.updateVariant(1, { store_ids: [1] })).store_ids).toEqual([1]);
+        await expect(variant.updateVariant(1, { store_ids: [1, 2] })).rejects.toThrow(/RPN Store Depok/);
+        expect((await variant.getVariants()).find(v => v.id === 1)?.recipe_store_ids).toEqual([1]);
+
+        // Copy with make_available → sellable at store 2 too.
+        await recipe.copyVariantRecipes(1, 2, [1], true);
+        const after = (await variant.getVariants()).find(v => v.id === 1);
+        expect(after?.store_ids).toEqual([1, 2]);
+        expect(after?.recipe_store_ids).toEqual([1, 2]);
+
+        // Emptying the recipe at store 1 removes store 1 from availability.
+        await recipe.replaceVariantRecipe(1, 1, []);
+        expect((await variant.getVariants()).find(v => v.id === 1)?.store_ids).toEqual([2]);
+
+        // Deleting the last line at store 2 does the same.
+        const [line] = await recipe.getVariantRecipes({ store_id: 2, variant_id: 1 });
+        await recipe.deleteVariantRecipeLine(line.id);
+        expect((await variant.getVariants()).find(v => v.id === 1)?.store_ids).toEqual([]);
+    });
+
     it('suggests previously used grams per ingredient (most used first, across stores)', async () => {
         const coklat = await stock.createStock({ item_name: 'Cokelat', unit: 'gram', store_id: 1 });
         await recipe.replaceVariantRecipe(1, 1, [{ stock_id: coklat.id, qty_gram: 100 }]);
@@ -177,8 +203,9 @@ describe.skipIf(!hasTestDb)('stock & recipe services (local Postgres)', () => {
 
     it('variant CRUD: unique names (case-insensitive), used flavors can only be deactivated', async () => {
         const variant = await import('../variant.service');
-        const v = await variant.createVariant({ variant_name: '  Choco   Cheese ', store_ids: [1, 2] });
-        expect(v).toMatchObject({ variant_name: 'Choco Cheese', is_active: true, store_ids: [1, 2] });
+        const v = await variant.createVariant({ variant_name: '  Choco   Cheese ' });
+        expect(v).toMatchObject({ variant_name: 'Choco Cheese', is_active: true, store_ids: [] }); // unsold until a recipe exists
+        await expect(variant.createVariant({ variant_name: 'Vanila', store_ids: [1] })).rejects.toThrow(/Belum ada resep/);
         await expect(variant.createVariant({ variant_name: 'choco cheese' })).rejects.toMatchObject({ status: 409 });
         await expect(variant.createVariant({ variant_name: '' })).rejects.toMatchObject({ status: 400 });
         expect((await variant.updateVariant(v.id, { variant_name: 'Choco Cheese', is_active: false })).is_active).toBe(false);

@@ -8,11 +8,38 @@ import {
 } from "@whiskeysockets/baileys";
 import { redis } from "../config/redis";
 
-export const useRedisAuthState = async (sessionName: string): Promise<{
+/** All keys matching `pattern`, via SCAN (never KEYS: the Redis instance is shared with other apps). */
+const scanKeys = async (pattern: string): Promise<string[]> => {
+    const found: string[] = [];
+    let cursor: string | number = 0;
+    do {
+        const [next, keys]: [string | number, string[]] = await redis.scan(cursor, { match: pattern, count: 500 });
+        cursor = next;
+        found.push(...keys);
+    } while (String(cursor) !== '0');
+    return found;
+};
+
+/**
+ * One-time move of a session stored under an old prefix to the new one. RENAMENX is atomic and
+ * never overwrites a key that already exists under the new name, so running it again is harmless.
+ */
+export const migrateLegacySession = async (legacyPrefix: string, sessionName: string) => {
+    const legacyKeys = await scanKeys(`${legacyPrefix}:*`);
+    for (const key of legacyKeys) {
+        const target = `${sessionName}${key.slice(legacyPrefix.length)}`;
+        const moved = await redis.renamenx(key, target);
+        if (!moved) await redis.del(key); // already migrated: the new key wins
+    }
+    if (legacyKeys.length > 0) console.log(`[wa] migrated ${legacyKeys.length} session key(s) from ${legacyPrefix}:* to ${sessionName}:*`);
+};
+
+export const useRedisAuthState = async (sessionName: string, legacyPrefix?: string): Promise<{
     state: AuthenticationState;
     saveCreds: () => Promise<void>;
     clearState: () => Promise<void>;
 }> => {
+    if (legacyPrefix && legacyPrefix !== sessionName) await migrateLegacySession(legacyPrefix, sessionName);
 
     const credsKey = `${sessionName}:creds`;
 
@@ -41,7 +68,7 @@ export const useRedisAuthState = async (sessionName: string): Promise<{
     };
 
     const clearState = async () => {
-        const keys = await redis.keys(`${sessionName}:*`);
+        const keys = await scanKeys(`${sessionName}:*`);
         if (keys.length) {
             await redis.del(...keys);
         }

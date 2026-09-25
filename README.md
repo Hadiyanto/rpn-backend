@@ -49,10 +49,26 @@ DATABASE_URL=postgres://localhost/rpn_migration_test node node_modules/.bin/node
 
 ## Scripts
 
-- `scripts/cleanup-hampers-redis.ts [--dry-run]` — remove retired HAMPERS / legacy quota keys.
 - `scripts/resync-quotas.ts` — recompute all upcoming daily + hourly quota counters from Postgres.
+- `scripts/clear-quota-redis.ts [--dry-run] [--caches]` — delete RPN quota counters (and cached menu/variant lists).
+- `scripts/backup-csv.ts` — read-only CSV export of every table into `backups/` (gitignored).
 
 Run with `npx ts-node scripts/<name>.ts` (uses `.env`, i.e. production if that's what it points to).
+
+## Redis keys
+
+The Upstash instance is **shared with other apps**, so every RPN key lives under `rpn:` and is
+built in `src/utils/redisKeys.ts` (never write key strings inline). Scripts only scan `rpn:*` patterns.
+
+| Key | Holds | TTL |
+|---|---|---|
+| `rpn:quota:daily:{storeId}:{YYYY-MM-DD}` | remaining box units that day (HALF = 0.5) | a few days after the date |
+| `rpn:quota:hourly:{storeId}:{YYYY-MM-DD}:{HH}` | remaining box units in that hour slot | same |
+| `rpn:cache:menu:v{n}` / `rpn:cache:variants:v{n}` | cached `GET /menu`, `GET /variants` | 30 days, deleted on change |
+| `rpn:wa:main:{type}` | WhatsApp (Baileys) auth state | none |
+
+Bump the cache version when the cached row shape changes. The WhatsApp session used to live under
+`rpn-wa-session:*`; it is renamed to `rpn:wa:main:*` automatically on first start (RENAMENX, idempotent).
 
 ## Docs
 

@@ -231,6 +231,10 @@ export const replaceVariantRecipe = async (variant_id: number, store_id: number,
         }
 
         await client.query('DELETE FROM variant_recipe WHERE variant_id = $1 AND store_id = $2', [variant_id, store_id]);
+        // No recipe left at this store → the flavor can't be sold there any more.
+        if (parsed.length === 0) {
+            await client.query('UPDATE variant SET store_ids = array_remove(store_ids, $2) WHERE id = $1', [variant_id, store_id]);
+        }
         for (const line of parsed) {
             await client.query(
                 'INSERT INTO variant_recipe (variant_id, store_id, stock_id, qty_gram) VALUES ($1, $2, $3, $4)',
@@ -249,7 +253,15 @@ export const replaceVariantRecipe = async (variant_id: number, store_id: number,
 };
 
 export const deleteVariantRecipeLine = async (id: number) => {
-    await pool.query('DELETE FROM variant_recipe WHERE id = $1', [id]);
+    await transaction(async (client) => {
+        const { rows: [line] } = await client.query('DELETE FROM variant_recipe WHERE id = $1 RETURNING variant_id, store_id', [id]);
+        if (!line) return;
+        // Last line gone → the flavor can't be sold at that store any more.
+        await client.query(`
+            UPDATE variant SET store_ids = array_remove(store_ids, $2)
+            WHERE id = $1 AND NOT EXISTS (SELECT 1 FROM variant_recipe WHERE variant_id = $1 AND store_id = $2)
+        `, [line.variant_id, line.store_id]);
+    });
     return true;
 };
 
@@ -290,11 +302,12 @@ export interface CopyRecipesResult {
 
 /**
  * Copies recipes from one store to another, matching ingredients by name (case-insensitive).
+ * With `makeAvailable`, the copied flavors are also switched on for sale at the target store.
  * Ingredients the target store doesn't have yet are created there with stock 0 and the same unit.
  * Existing recipes of the copied flavors at the target store are replaced.
  * `variantIds` limits the copy to those flavors; omitted = every flavor with a recipe.
  */
-export const copyVariantRecipes = async (fromStoreId: number, toStoreId: number, variantIds?: number[]): Promise<CopyRecipesResult> => {
+export const copyVariantRecipes = async (fromStoreId: number, toStoreId: number, variantIds?: number[], makeAvailable = false): Promise<CopyRecipesResult> => {
     if (!Number.isInteger(fromStoreId) || !Number.isInteger(toStoreId) || fromStoreId < 1 || toStoreId < 1) {
         throw new ValidationError('store_id asal dan tujuan wajib diisi');
     }
@@ -336,6 +349,14 @@ export const copyVariantRecipes = async (fromStoreId: number, toStoreId: number,
             await client.query(
                 'INSERT INTO variant_recipe (variant_id, store_id, stock_id, qty_gram) VALUES ($1, $2, $3, $4)',
                 [line.variant_id, toStoreId, byName.get(String(line.item_name).trim().toLowerCase()), line.qty_gram]
+            );
+        }
+
+        // Optionally start selling the copied flavors at the target store right away.
+        if (makeAvailable) {
+            await client.query(
+                'UPDATE variant SET store_ids = array_append(store_ids, $2) WHERE id = ANY($1::int[]) AND NOT ($2 = ANY(store_ids))',
+                [copiedVariants, toStoreId]
             );
         }
 

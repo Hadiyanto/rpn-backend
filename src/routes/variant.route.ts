@@ -2,11 +2,12 @@ import { Router } from 'express';
 import { sendError } from '../utils/errors';
 import { getVariants, createVariant, updateVariant, deleteVariant } from '../services/variant.service';
 import { redis } from '../config/redis';
+import { redisKeys } from '../utils/redisKeys';
 
 const router = Router();
 
 // Bump the version whenever the variant row shape changes so stale cached lists are ignored.
-export const VARIANT_CACHE_KEY = 'variant_list:v3';
+export const VARIANT_CACHE_KEY = redisKeys.variantsCache;
 
 
 

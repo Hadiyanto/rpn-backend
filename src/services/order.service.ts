@@ -2,6 +2,7 @@ import { pool, transaction } from '../config/db';
 import { redis, ttlUntilDate } from '../utils/redis';
 import { BOX_UNITS_SQL, boxUnits, remainingQuota } from '../utils/boxUnits';
 import { dayOfWeek } from '../utils/date';
+import { redisKeys } from '../utils/redisKeys';
 import { ConflictError, NotFoundError } from '../utils/errors';
 import { ensureDailyQuotaKey, syncDailyRedisQuota } from './dailyQuota.service';
 import { syncHourlyRedisQuota } from './hourlyQuota.service';
@@ -137,11 +138,11 @@ export const createOrder = async (payload: CreateOrderPayload) => {
     try {
         if (requestedBoxQty > 0) {
             await ensureDailyQuotaKey(store_id, pickup_date);
-            const remainingBoxStr = await redis.incrbyfloat(`quota:${store_id}:${pickup_date}`, -requestedBoxQty);
+            const remainingBoxStr = await redis.incrbyfloat(redisKeys.dailyQuota(store_id, pickup_date), -requestedBoxQty);
             const remainingBox = parseFloat(remainingBoxStr as unknown as string);
             if (remainingBox < 0) {
                 // Revert atomic decrement if we've gone below zero
-                await redis.incrbyfloat(`quota:${store_id}:${pickup_date}`, requestedBoxQty);
+                await redis.incrbyfloat(redisKeys.dailyQuota(store_id, pickup_date), requestedBoxQty);
                 throw new ConflictError(`MOHON MAAF: Kuota Box untuk tanggal ${pickup_date} sudah penuh.`);
             }
             reservedBox = true;
@@ -177,7 +178,7 @@ export const createOrder = async (payload: CreateOrderPayload) => {
                 // Uses SET NX so that if two requests race on a cold cache, only the first
                 // SET actually lands — the loser's SET becomes a no-op instead of clobbering
                 // a decrement the winner may have already applied.
-                const rHourlyBox = await redis.get(`hourly:${store_id}:${pickup_date}:${hourStr}`);
+                const rHourlyBox = await redis.get(redisKeys.hourlyQuota(store_id, pickup_date, hourStr));
 
                 if (rHourlyBox === null) {
                     const usedHourlyRes = await pool.query(`
@@ -191,15 +192,15 @@ export const createOrder = async (payload: CreateOrderPayload) => {
                         AND o.status != 'CANCELLED'
                     `, [pickup_date, store_id, `${pickup_time.split(':')[0]}:%`]);
                     const usedHourlyBox = parseFloat(usedHourlyRes.rows[0].used_box);
-                    await redis.set(`hourly:${store_id}:${pickup_date}:${hourStr}`, remainingQuota(maxHourly, usedHourlyBox), { nx: true, ex: ttlUntilDate(pickup_date) });
+                    await redis.set(redisKeys.hourlyQuota(store_id, pickup_date, hourStr), remainingQuota(maxHourly, usedHourlyBox), { nx: true, ex: ttlUntilDate(pickup_date) });
                 }
 
                 // Perform Atomic Decrements for Hourly
                 if (requestedBoxQty > 0) {
-                    const remainingHourlyBoxStr = await redis.incrbyfloat(`hourly:${store_id}:${pickup_date}:${hourStr}`, -requestedBoxQty);
+                    const remainingHourlyBoxStr = await redis.incrbyfloat(redisKeys.hourlyQuota(store_id, pickup_date, hourStr), -requestedBoxQty);
                     const remainingHourlyBox = parseFloat(remainingHourlyBoxStr as unknown as string);
                     if (remainingHourlyBox < 0) {
-                        await redis.incrbyfloat(`hourly:${store_id}:${pickup_date}:${hourStr}`, requestedBoxQty);
+                        await redis.incrbyfloat(redisKeys.hourlyQuota(store_id, pickup_date, hourStr), requestedBoxQty);
                         throw new ConflictError(`MOHON MAAF: Kuota Jam ${hourStr} di tanggal ${pickup_date} sudah penuh. Silakan pilih jam lain.`);
                     }
                     reservedHourlyBox = true;
@@ -247,12 +248,12 @@ export const createOrder = async (payload: CreateOrderPayload) => {
         // If the database transaction failed for any reason AFTER we successfully reserved in Redis,
         // we must rollback our Redis cache decrement immediately.
         if (reservedBox) {
-            await redis.incrbyfloat(`quota:${store_id}:${pickup_date}`, requestedBoxQty);
+            await redis.incrbyfloat(redisKeys.dailyQuota(store_id, pickup_date), requestedBoxQty);
         }
 
         // Also rollback hourly quotas if they were reserved and then DB failed
         if (reservedHourlyBox && hourStr) {
-            await redis.incrbyfloat(`hourly:${store_id}:${pickup_date}:${hourStr}`, requestedBoxQty);
+            await redis.incrbyfloat(redisKeys.hourlyQuota(store_id, pickup_date, hourStr), requestedBoxQty);
         }
 
         throw e;

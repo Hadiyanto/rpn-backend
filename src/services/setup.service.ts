@@ -22,9 +22,10 @@ export const getSetupStatus = async (storeId: number): Promise<SetupStep[]> => {
         pool.query('SELECT name, price, is_active, $1 = ANY(store_ids) AS in_store FROM menu', [storeId]),
         pool.query(`
             SELECT v.id, v.variant_name,
-                   EXISTS (SELECT 1 FROM variant_recipe vr WHERE vr.variant_id = v.id AND vr.store_id = $1) AS has_recipe
+                   EXISTS (SELECT 1 FROM variant_recipe vr WHERE vr.variant_id = v.id AND vr.store_id = $1) AS has_recipe,
+                   $1 = ANY(v.store_ids) AS is_sold
             FROM variant v
-            WHERE v.is_active IS NOT FALSE AND $1 = ANY(v.store_ids)
+            WHERE v.is_active IS NOT FALSE
         `, [storeId]),
         pool.query(`
             SELECT count(*)::int AS total,
@@ -45,6 +46,7 @@ export const getSetupStatus = async (storeId: number): Promise<SetupStep[]> => {
     });
     const activeVariants = variants.rows;
     const withoutRecipe = activeVariants.filter(v => !v.has_recipe);
+    const sold = activeVariants.filter(v => v.is_sold);
     const s = stocks.rows[0];
     const st = store.rows[0] ?? {};
 
@@ -60,7 +62,7 @@ export const getSetupStatus = async (storeId: number): Promise<SetupStep[]> => {
             key: 'variants',
             title: 'Varian rasa',
             state: state(activeVariants.length > 0),
-            detail: `${activeVariants.length} rasa aktif di store ini`,
+            detail: `${activeVariants.length} rasa aktif`,
             href: '/config?tab=varian',
         },
         {
@@ -78,6 +80,13 @@ export const getSetupStatus = async (storeId: number): Promise<SetupStep[]> => {
                 ? (activeVariants.length ? 'Semua rasa punya resep' : 'Belum ada rasa')
                 : `Belum ada resep: ${withoutRecipe.slice(0, 5).map(v => v.variant_name).join(', ')}${withoutRecipe.length > 5 ? ` +${withoutRecipe.length - 5}` : ''}`,
             href: '/config?tab=varian',
+        },
+        {
+            key: 'availability',
+            title: 'Rasa yang dijual di store ini',
+            state: state(sold.length > 0 && sold.length === activeVariants.length - withoutRecipe.length, sold.length > 0),
+            detail: `${sold.length} dari ${activeVariants.length} rasa dijual${withoutRecipe.length ? ` (${withoutRecipe.length} belum punya resep di store ini)` : ''}`,
+            href: '/config?tab=tersedia',
         },
         {
             key: 'quota',

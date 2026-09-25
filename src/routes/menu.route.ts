@@ -2,11 +2,12 @@ import { Router } from 'express';
 import { sendError } from '../utils/errors';
 import { getMenus, createMenu, updateMenu, deleteMenu } from '../services/menu.service';
 import { redis } from '../config/redis';
+import { redisKeys } from '../utils/redisKeys';
 
 const router = Router();
 
 // Bump the version whenever the menu row shape changes so stale cached lists are ignored.
-export const MENU_CACHE_KEY = 'menu_list:v3';
+export const MENU_CACHE_KEY = redisKeys.menuCache;
 
 const pickMenuFields = (body: any) => {
     const { name, price, description, is_active, store_ids, box_multiplier, max_flavors, weight_gram, length_cm, width_cm, height_cm } = body ?? {};

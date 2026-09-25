@@ -6,13 +6,15 @@ import {
 import pino from 'pino';
 import QRCode from 'qrcode';
 import { useRedisAuthState } from '../utils/useRedisAuthState';
+import { LEGACY_WA_SESSION_PREFIX, redisKeys } from '../utils/redisKeys';
 
 class WhatsAppService {
     public sock: any = null;
     public qr: string | null = null;
     public isConnected = false;
 
-    private sessionName = 'rpn-wa-session';
+    // Auth keys live under rpn:wa:main:* (renamed from the pre-namespace rpn-wa-session:* on first start).
+    private sessionName = redisKeys.waSession('main');
     private clearStateMethod: (() => Promise<void>) | null = null;
     private logger = pino({ level: 'silent' });
 
@@ -39,7 +41,7 @@ class WhatsAppService {
                 this.sock = null;
             }
 
-            const { state, saveCreds, clearState } = await useRedisAuthState(this.sessionName);
+            const { state, saveCreds, clearState } = await useRedisAuthState(this.sessionName, LEGACY_WA_SESSION_PREFIX);
             this.clearStateMethod = clearState;
 
             const { version } = await fetchLatestBaileysVersion();

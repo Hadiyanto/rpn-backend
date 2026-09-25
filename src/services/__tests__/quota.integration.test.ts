@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { hasTestDb, useTestDb } from '../../__tests__/testDb';
 import { createFakeRedis } from '../../__tests__/fakeRedis';
+import { redisKeys } from '../../utils/redisKeys';
 
 const fakeRedis = createFakeRedis();
 vi.mock('../../utils/redis', async (importOriginal) => ({
@@ -43,7 +44,7 @@ describe.skipIf(!hasTestDb)('quota under load (local Postgres + in-memory Redis)
         expect(ok).toHaveLength(10);
         expect(rejected.every(r => r.reason?.status === 409)).toBe(true);
         expect(await orderCount()).toBe(10);
-        expect(fakeRedis.store.get(`quota:1:${DATE}`)).toBe(0);
+        expect(fakeRedis.store.get(redisKeys.dailyQuota(1, DATE))).toBe(0);
     });
 
     it('hourly slot cap also holds under parallel load', async () => {
@@ -53,23 +54,23 @@ describe.skipIf(!hasTestDb)('quota under load (local Postgres + in-memory Redis)
         );
         expect(results.filter(r => r.status === 'fulfilled')).toHaveLength(3);
         // The 5 rejected by the hourly cap must have given their daily reservation back.
-        expect(fakeRedis.store.get(`quota:1:${DATE}`)).toBe(7);
+        expect(fakeRedis.store.get(redisKeys.dailyQuota(1, DATE))).toBe(7);
     });
 
     it('cancel frees quota, un-cancel takes it again (HALF = 0.5)', async () => {
         const a = await orders.createOrder({ ...base, pesanan: [{ box_type: 'HALF', name: 'Keju', qty: 4 }] }); // 2 boxes
-        expect(fakeRedis.store.get(`quota:1:${DATE}`)).toBe(8);
+        expect(fakeRedis.store.get(redisKeys.dailyQuota(1, DATE))).toBe(8);
         await orders.updateOrderStatus(a.id, 'CANCELLED');
-        expect(fakeRedis.store.get(`quota:1:${DATE}`)).toBe(10);
+        expect(fakeRedis.store.get(redisKeys.dailyQuota(1, DATE))).toBe(10);
         await orders.updateOrderStatus(a.id, 'UNPAID');
-        expect(fakeRedis.store.get(`quota:1:${DATE}`)).toBe(8);
+        expect(fakeRedis.store.get(redisKeys.dailyQuota(1, DATE))).toBe(8);
     });
 
     it('editing an order resyncs quota for the old and the new date', async () => {
         await db.pool.query(`INSERT INTO daily_quota (date, qty, store_id) VALUES ('2099-01-06', 10, 1)`);
         const a = await orders.createOrder({ ...base, pesanan: [{ box_type: 'FULL', name: 'Keju', qty: 3 }] });
         await orders.updateOrder(a.id, { pickup_date: '2099-01-06', pesanan: [{ box_type: 'FULL', name: 'Keju', qty: 4 }] });
-        expect(fakeRedis.store.get(`quota:1:${DATE}`)).toBe(10);
-        expect(fakeRedis.store.get('quota:1:2099-01-06')).toBe(6);
+        expect(fakeRedis.store.get(redisKeys.dailyQuota(1, DATE))).toBe(10);
+        expect(fakeRedis.store.get(redisKeys.dailyQuota(1, '2099-01-06'))).toBe(6);
     });
 });

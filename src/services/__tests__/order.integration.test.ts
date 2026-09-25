@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { hasTestDb, useTestDb } from '../../__tests__/testDb';
 import { createFakeRedis } from '../../__tests__/fakeRedis';
+import { redisKeys } from '../../utils/redisKeys';
 
 const fakeRedis = createFakeRedis();
 vi.mock('../../utils/redis', async (importOriginal) => ({
@@ -59,7 +60,7 @@ describe.skipIf(!hasTestDb)('orders with variant_ids (local Postgres + fake Redi
         fakeRedis.store.clear(); // simulate eviction
         await orders.createOrder({ ...base, pesanan: [{ box_type: 'HALF', name: 'Keju', qty: 2 }] });
         // 10 − 4 − (2 × 0.5) = 5
-        expect(fakeRedis.store.get(`quota:1:${DATE}`)).toBe(5);
+        expect(fakeRedis.store.get(redisKeys.dailyQuota(1, DATE))).toBe(5);
     });
 
     it('rejects a date without daily quota with a clear message', async () => {

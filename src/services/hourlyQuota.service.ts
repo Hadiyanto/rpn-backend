@@ -2,6 +2,7 @@ import { pool, transaction } from '../config/db';
 import { redis, ttlUntilDate } from '../utils/redis';
 import { BOX_UNITS_SQL, remainingQuota } from '../utils/boxUnits';
 import { todayWIB } from '../utils/validation';
+import { redisKeys } from '../utils/redisKeys';
 
 export interface HourlyQuota {
     id: number;
@@ -31,7 +32,7 @@ export const getHourlyAvailability = async (date: string, store_id: number): Pro
     );
 
     // Fetch all Redis keys at once for this date's time slots
-    const keys = rows.map(row => `hourly:${store_id}:${date}:${row.time_str}`);
+    const keys = rows.map(row => redisKeys.hourlyQuota(store_id, date, row.time_str));
 
     let redisVals: (string | number | null)[] = [];
     if (keys.length > 0) {
@@ -130,7 +131,7 @@ export const syncHourlyRedisQuota = async (date: string, store_id: number) => {
             const rQty = remainingQuota(parseFloat(row.qty), parseFloat(row.used_qty));
 
             const ex = ttlUntilDate(date);
-            await redis.set(`hourly:${store_id}:${date}:${row.time_str}`, rQty, { ex });
+            await redis.set(redisKeys.hourlyQuota(store_id, date, row.time_str), rQty, { ex });
         }
     } catch (err) {
         console.error(`Failed to sync hourly Redis quotas for store ${store_id}, date: ${date}`, err);

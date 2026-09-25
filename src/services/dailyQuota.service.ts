@@ -2,9 +2,10 @@ import { pool, insertRow } from '../config/db';
 import { redis, ttlUntilDate } from '../utils/redis';
 import { BOX_UNITS_SQL, remainingQuota } from '../utils/boxUnits';
 import { ValidationError } from '../utils/validation';
+import { redisKeys } from '../utils/redisKeys';
 import { NotFoundError } from '../utils/errors';
 
-const dailyKey = (store_id: number, date: string) => `quota:${store_id}:${date}`;
+const dailyKey = redisKeys.dailyQuota;
 
 /** Box units already taken by non-cancelled orders, per pickup date. Dates without orders are 0. */
 export const getUsedBoxByDate = async (store_id: number, dates: string[]): Promise<Map<string, number>> => {
