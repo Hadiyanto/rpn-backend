@@ -5,6 +5,8 @@ import {
     replaceVariantRecipe,
     deleteVariantRecipeLine,
     getVariantHpp,
+    getGramSuggestions,
+    copyVariantRecipes,
 } from '../services/variantRecipe.service';
 
 const router = Router();
@@ -19,6 +21,27 @@ router.get('/variant-recipe', async (req, res) => {
         }
         const variant_id = req.query.variant_id ? Number(req.query.variant_id) : undefined;
         const data = await getVariantRecipes({ store_id, variant_id });
+        res.json({ status: 'ok', data });
+    } catch (e: any) {
+        sendError(res, e);
+    }
+});
+
+// GET /variant-recipe/suggestions → { "<ingredient name>": [{ qty_gram, uses }] }
+router.get('/variant-recipe/suggestions', async (_req, res) => {
+    try {
+        res.json({ status: 'ok', data: await getGramSuggestions() });
+    } catch (e: any) {
+        sendError(res, e);
+    }
+});
+
+// POST /variant-recipe/copy  { from_store_id, to_store_id, variant_ids? }
+router.post('/variant-recipe/copy', async (req, res) => {
+    try {
+        const { from_store_id, to_store_id, variant_ids } = req.body ?? {};
+        const ids = variant_ids === undefined || variant_ids === null ? undefined : Array.isArray(variant_ids) ? variant_ids.map(Number) : [NaN];
+        const data = await copyVariantRecipes(Number(from_store_id), Number(to_store_id), ids);
         res.json({ status: 'ok', data });
     } catch (e: any) {
         sendError(res, e);

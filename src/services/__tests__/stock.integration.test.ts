@@ -124,6 +124,36 @@ describe.skipIf(!hasTestDb)('stock & recipe services (local Postgres)', () => {
         await expect(stock.deleteStock(tepung.id)).rejects.toMatchObject({ status: 404 });
     });
 
+    it('copies recipes to another store, matching ingredients by name and creating missing ones', async () => {
+        const coklat1 = await stock.createStock({ item_name: 'Cokelat', unit: 'gram', store_id: 1 });
+        const keju1 = await stock.createStock({ item_name: 'Keju', unit: 'gram', store_id: 1 });
+        const coklat2 = await stock.createStock({ item_name: 'cokelat', unit: 'gram', store_id: 2 }); // same ingredient, other case
+        await recipe.replaceVariantRecipe(1, 1, [{ stock_id: coklat1.id, qty_gram: 100 }, { stock_id: keju1.id, qty_gram: 20 }]);
+        await recipe.replaceVariantRecipe(2, 1, [{ stock_id: coklat1.id, qty_gram: 100 }]);
+
+        const one = await recipe.copyVariantRecipes(1, 2, [1]);
+        expect(one).toEqual({ copied_variants: 1, created_stock: ['Keju'] });
+        const store2 = await recipe.getVariantRecipes({ store_id: 2, variant_id: 1 });
+        expect(store2.map(r => [r.item_name, r.qty_gram]).sort()).toEqual([['Keju', 20], ['cokelat', 100]]);
+        expect(store2.find(r => r.item_name === 'cokelat')?.stock_id).toBe(coklat2.id);
+
+        // Copy everything; Keju now exists at store 2 so nothing new is created, and re-copying replaces.
+        expect(await recipe.copyVariantRecipes(1, 2)).toEqual({ copied_variants: 2, created_stock: [] });
+        expect((await recipe.getVariantRecipes({ store_id: 2 })).length).toBe(3);
+
+        await expect(recipe.copyVariantRecipes(1, 1)).rejects.toThrow(/tidak boleh sama/);
+        await expect(recipe.copyVariantRecipes(2, 1, [3])).rejects.toThrow(/Belum ada resep/);
+    });
+
+    it('suggests previously used grams per ingredient (most used first, across stores)', async () => {
+        const coklat = await stock.createStock({ item_name: 'Cokelat', unit: 'gram', store_id: 1 });
+        await recipe.replaceVariantRecipe(1, 1, [{ stock_id: coklat.id, qty_gram: 100 }]);
+        await recipe.replaceVariantRecipe(2, 1, [{ stock_id: coklat.id, qty_gram: 100 }]);
+        await recipe.replaceVariantRecipe(3, 1, [{ stock_id: coklat.id, qty_gram: 80 }]);
+        const s = await recipe.getGramSuggestions();
+        expect(s['cokelat']).toEqual([{ qty_gram: 100, uses: 2 }, { qty_gram: 80, uses: 1 }]);
+    });
+
     it('menu box CRUD follows the product rules (FULL 3 rasa, HALF 1 rasa, porsi 0.5)', async () => {
         await db.pool.query('TRUNCATE menu RESTART IDENTITY CASCADE');
         const menu = await import('../menu.service');

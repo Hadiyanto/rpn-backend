@@ -252,3 +252,93 @@ export const deleteVariantRecipeLine = async (id: number) => {
     await pool.query('DELETE FROM variant_recipe WHERE id = $1', [id]);
     return true;
 };
+
+// ---------------------------------------------------------------------------
+// Faster recipe entry: gram suggestions + copying recipes between stores
+// ---------------------------------------------------------------------------
+
+export interface GramSuggestion {
+    qty_gram: number;
+    uses: number;
+}
+
+/**
+ * Grams previously used per ingredient, most used first, keyed by lower-cased ingredient name
+ * (so a value entered at one store is suggested at the other store too). Derived from the saved
+ * recipes, so it's shared across devices and admins.
+ */
+export const getGramSuggestions = async (): Promise<Record<string, GramSuggestion[]>> => {
+    const { rows } = await pool.query(`
+        SELECT lower(trim(s.item_name)) AS ingredient, vr.qty_gram, count(*)::int AS uses
+        FROM variant_recipe vr
+        JOIN stock s ON s.id = vr.stock_id
+        GROUP BY 1, 2
+        ORDER BY 1, uses DESC, vr.qty_gram
+    `);
+    const out: Record<string, GramSuggestion[]> = {};
+    for (const r of rows) {
+        const list = (out[r.ingredient] ??= []);
+        if (list.length < 5) list.push({ qty_gram: Number(r.qty_gram), uses: r.uses });
+    }
+    return out;
+};
+
+export interface CopyRecipesResult {
+    copied_variants: number;
+    created_stock: string[];
+}
+
+/**
+ * Copies recipes from one store to another, matching ingredients by name (case-insensitive).
+ * Ingredients the target store doesn't have yet are created there with stock 0 and the same unit.
+ * Existing recipes of the copied flavors at the target store are replaced.
+ * `variantIds` limits the copy to those flavors; omitted = every flavor with a recipe.
+ */
+export const copyVariantRecipes = async (fromStoreId: number, toStoreId: number, variantIds?: number[]): Promise<CopyRecipesResult> => {
+    if (!Number.isInteger(fromStoreId) || !Number.isInteger(toStoreId) || fromStoreId < 1 || toStoreId < 1) {
+        throw new ValidationError('store_id asal dan tujuan wajib diisi');
+    }
+    if (fromStoreId === toStoreId) throw new ValidationError('Store asal dan tujuan tidak boleh sama');
+    if (variantIds && (!Array.isArray(variantIds) || variantIds.some(id => !Number.isInteger(id) || id < 1))) {
+        throw new ValidationError('variant_ids tidak valid');
+    }
+
+    return transaction(async (client) => {
+        const target = await client.query('SELECT id FROM stores WHERE id = $1', [toStoreId]);
+        if (target.rowCount === 0) throw new ValidationError('Store tujuan tidak ditemukan');
+
+        const { rows: source } = await client.query(`
+            SELECT vr.variant_id, vr.qty_gram, s.item_name, s.unit
+            FROM variant_recipe vr JOIN stock s ON s.id = vr.stock_id
+            WHERE vr.store_id = $1 ${variantIds ? 'AND vr.variant_id = ANY($2::int[])' : ''}
+            ORDER BY vr.variant_id, s.item_name
+        `, variantIds ? [fromStoreId, variantIds] : [fromStoreId]);
+        if (source.length === 0) throw new ValidationError('Belum ada resep di store asal untuk disalin');
+
+        // Target store's ingredients by name; create the missing ones.
+        const { rows: targetStock } = await client.query('SELECT id, item_name FROM stock WHERE store_id = $1', [toStoreId]);
+        const byName = new Map(targetStock.map(s => [String(s.item_name).trim().toLowerCase(), s.id as number]));
+        const created: string[] = [];
+        for (const line of source) {
+            const key = String(line.item_name).trim().toLowerCase();
+            if (byName.has(key)) continue;
+            const { rows: [row] } = await client.query(
+                'INSERT INTO stock (item_name, unit, store_id, qty) VALUES ($1, $2, $3, 0) RETURNING id',
+                [String(line.item_name).trim(), line.unit, toStoreId]
+            );
+            byName.set(key, row.id);
+            created.push(String(line.item_name).trim());
+        }
+
+        const copiedVariants = [...new Set(source.map(l => l.variant_id as number))];
+        await client.query('DELETE FROM variant_recipe WHERE store_id = $1 AND variant_id = ANY($2::int[])', [toStoreId, copiedVariants]);
+        for (const line of source) {
+            await client.query(
+                'INSERT INTO variant_recipe (variant_id, store_id, stock_id, qty_gram) VALUES ($1, $2, $3, $4)',
+                [line.variant_id, toStoreId, byName.get(String(line.item_name).trim().toLowerCase()), line.qty_gram]
+            );
+        }
+
+        return { copied_variants: copiedVariants.length, created_stock: created };
+    });
+};
