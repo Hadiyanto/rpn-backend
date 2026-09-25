@@ -262,6 +262,8 @@ export const createOrder = async (payload: CreateOrderPayload) => {
 // Order row + items: [{ id, box_type, name, qty }] — the shape the supabase-js embed returned.
 const ORDER_WITH_ITEMS_COLUMNS = `
     o.*,
+    -- Raw-material cost booked for this order (fixed at deduction time; NULL = nothing priced).
+    (SELECT SUM(-sh.qty_change * sh.unit_cost) FROM stock_history sh WHERE sh.order_id = o.id) AS stock_cost,
     COALESCE(
         json_agg(json_build_object('id', oi.id, 'box_type', oi.box_type, 'name', oi.name, 'qty', oi.qty) ORDER BY oi.id)
             FILTER (WHERE oi.id IS NOT NULL),

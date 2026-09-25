@@ -110,6 +110,19 @@ describe.skipIf(!hasTestDb)('stock & recipe services (local Postgres)', () => {
         expect(history.find(h => Number(h.qty_change) === 5000)?.total_price).toBe(700000);
     });
 
+    it('purchase price can be set on create and edited directly (drives HPP)', async () => {
+        const tepung = await stock.createStock({ item_name: 'Tepung', unit: 'gram', store_id: 1, qty: 5000, price_per_unit: 140 });
+        expect(tepung.price_per_unit).toBe(140);
+        await recipe.replaceVariantRecipe(1, 1, [{ stock_id: tepung.id, qty_gram: 50 }]);
+        expect((await recipe.getVariantHpp([1], 'FULL', 1)).hpp).toBe(7000);
+
+        expect((await stock.updateStock(tepung.id, { price_per_unit: 150 })).price_per_unit).toBe(150);
+        expect((await stock.updateStock(tepung.id, { item_name: 'Tepung Terigu' })).price_per_unit).toBe(150); // untouched
+        expect((await stock.updateStock(tepung.id, { price_per_unit: null })).price_per_unit).toBeNull();
+        await expect(stock.updateStock(tepung.id, { price_per_unit: -1 })).rejects.toMatchObject({ status: 400 });
+        await expect(stock.createStock({ item_name: 'Gula', unit: 'gram', store_id: 1, price_per_unit: 'abc' as any })).rejects.toMatchObject({ status: 400 });
+    });
+
     it('edit/delete stock items: blocked while a recipe uses them', async () => {
         const tepung = await stock.createStock({ item_name: 'Tepung', unit: 'gram', store_id: 1 });
         expect((await stock.updateStock(tepung.id, { item_name: 'Tepung Terigu' })).item_name).toBe('Tepung Terigu');

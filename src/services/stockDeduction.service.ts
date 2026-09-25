@@ -1,6 +1,7 @@
 import type { PoolClient } from 'pg';
 import { transaction } from '../config/db';
 import { resolveBoxCost, type StockUsage } from './variantRecipe.service';
+import { weightedAverageCost } from '../utils/stockCost';
 
 /**
  * Automatic stock movements caused by orders (Fitur 3).
@@ -45,16 +46,42 @@ const netByStock = async (client: PoolClient, orderId: number) => {
     return new Map<number, number>(rows.map(r => [r.stock_id, Number(r.net)]));
 };
 
-const bookMovement = async (client: PoolClient, orderId: number, stockId: number, delta: number, notes: string) => {
+/** Net cost per unit of what this order still holds of each stock item (to put it back at that cost). */
+const netCostByStock = async (client: PoolClient, orderId: number) => {
+    const { rows } = await client.query(`
+        SELECT stock_id,
+               CASE WHEN SUM(qty_change) = 0 OR bool_or(unit_cost IS NULL) THEN NULL
+                    ELSE SUM(qty_change * unit_cost) / SUM(qty_change) END AS cost
+        FROM stock_history WHERE order_id = $1 GROUP BY stock_id
+    `, [orderId]);
+    return new Map<number, number | null>(rows.map(r => [r.stock_id, r.cost === null ? null : Number(r.cost)]));
+};
+
+/**
+ * Books one automatic movement for an order. OUT uses the stock's current (weighted-average)
+ * cost; a reversal IN puts the goods back at the cost they were taken out with, which also
+ * feeds back into the average.
+ */
+const bookMovement = async (client: PoolClient, orderId: number, stockId: number, delta: number, notes: string, returnCost?: number | null) => {
+    const { rows: [current] } = await client.query('SELECT qty, price_per_unit FROM stock WHERE id = $1 FOR UPDATE', [stockId]);
+    if (!current) return; // stock item deleted meanwhile; nothing to book
+    const currentCost = current.price_per_unit === null ? null : Number(current.price_per_unit);
+
+    let unitCost = currentCost;
+    let newCost = currentCost;
+    if (delta > 0 && returnCost != null) {
+        unitCost = returnCost;
+        newCost = weightedAverageCost(Number(current.qty), currentCost, delta, returnCost);
+    }
+
     const { rows: [stock] } = await client.query(
-        'UPDATE stock SET qty = qty + $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2 RETURNING qty',
-        [delta, stockId]
+        'UPDATE stock SET qty = qty + $1, price_per_unit = $3, updated_at = CURRENT_TIMESTAMP WHERE id = $2 RETURNING qty',
+        [delta, stockId, newCost]
     );
-    if (!stock) return; // stock item deleted meanwhile; nothing to book
     await client.query(
-        `INSERT INTO stock_history (stock_id, type, qty_change, final_qty, notes, order_id)
-         VALUES ($1, $2, $3, $4, $5, $6)`,
-        [stockId, delta < 0 ? 'OUT' : 'IN', delta, stock.qty, notes, orderId]
+        `INSERT INTO stock_history (stock_id, type, qty_change, final_qty, notes, order_id, unit_cost)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+        [stockId, delta < 0 ? 'OUT' : 'IN', delta, stock.qty, notes, orderId, unitCost]
     );
 };
 
@@ -104,10 +131,11 @@ export const reverseOrderStock = async (orderId: number): Promise<StockResult> =
         if (!order) return { status: 'skipped', reason: 'order not found', movements: [] };
 
         const movements: StockResult['movements'] = [];
+        const costs = await netCostByStock(client, orderId);
         for (const [stockId, net] of await netByStock(client, orderId)) {
             const rounded = Math.round(net * 100) / 100;
             if (rounded === 0) continue;
-            await bookMovement(client, orderId, stockId, -rounded, `Reversal Order #${orderId}`);
+            await bookMovement(client, orderId, stockId, -rounded, `Reversal Order #${orderId}`, costs.get(stockId) ?? null);
             movements.push({ stock_id: stockId, qty_change: -rounded });
         }
         return { status: movements.length > 0 ? 'reversed' : 'skipped', reason: movements.length > 0 ? undefined : 'nothing to reverse', movements };

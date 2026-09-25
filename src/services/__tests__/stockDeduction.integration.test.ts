@@ -115,6 +115,35 @@ describe.skipIf(!hasTestDb)('auto stock deduction lifecycle', () => {
         expect(await tepungQty()).toBe(4900);
     });
 
+    it('weighted-average cost: purchases average in, orders keep the cost they were deducted at', async () => {
+        const cost = async () => Number((await db.pool.query('SELECT price_per_unit FROM stock WHERE id = $1', [tepungId])).rows[0].price_per_unit);
+        // beforeEach: 5000 g for Rp 700.000 → 140/g
+        expect(await cost()).toBe(140);
+
+        // Order 2× FULL (100 g) is booked at 140 → Rp 14.000.
+        const order = await orders.createOrder({ ...base, pesanan: [{ box_type: 'FULL', name: 'Dark Choco', qty: 2, variant_ids: [1] }] });
+        expect((await orders.getOrderById(order.id)).stock_cost).toBe(14000);
+
+        // Buy 4900 g more for Rp 784.000 (160/g): (4900×140 + 4900×160) / 9800 = 150.
+        await stock.adjustStock({ stock_id: tepungId, qty_change: 4900, type: 'IN', total_price: 784000 });
+        expect(await cost()).toBe(150);
+        // The earlier order's cost doesn't move.
+        expect((await orders.getOrderById(order.id)).stock_cost).toBe(14000);
+
+        // A new order is booked at the new average.
+        const order2 = await orders.createOrder({ ...base, pesanan: [{ box_type: 'FULL', name: 'Dark Choco', qty: 1, variant_ids: [1] }] });
+        expect((await orders.getOrderById(order2.id)).stock_cost).toBe(7500);
+
+        // Cancelling order 1 returns 100 g at 140: (9750×150 + 100×140) / 9850 = 149.8985.
+        await orders.updateOrderStatus(order.id, 'CANCELLED');
+        expect(await cost()).toBe(149.8985);
+        expect(Number((await orders.getOrderById(order.id)).stock_cost)).toBe(0);
+
+        // Every automatic movement carries its unit cost.
+        const { rows } = await db.pool.query('SELECT type, unit_cost FROM stock_history WHERE order_id = $1 ORDER BY id', [order.id]);
+        expect(rows.map(r => [r.type, Number(r.unit_cost)])).toEqual([['OUT', 140], ['IN', 140]]);
+    });
+
     it('legacy items without variant_ids are not deducted', async () => {
         await orders.createOrder({ ...base, pesanan: [{ box_type: 'FULL', name: 'Dark Choco', qty: 3 }] });
         expect(await tepungQty()).toBe(5000);

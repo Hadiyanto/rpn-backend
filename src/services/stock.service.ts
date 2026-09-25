@@ -2,6 +2,7 @@ import { pool, transaction } from '../config/db';
 import { ValidationError } from '../utils/validation';
 import { ConflictError, NotFoundError } from '../utils/errors';
 import { isGramUnit } from './variantRecipe.service';
+import { weightedAverageCost } from '../utils/stockCost';
 
 export type StockMovementType = 'IN' | 'OUT' | 'ADJUSTMENT';
 
@@ -17,7 +18,18 @@ export interface CreateStockDTO {
     unit: string;
     store_id: number;
     qty?: number;
+    /** Purchase price per unit (e.g. Rp per gram). Optional; drives HPP. */
+    price_per_unit?: number | null;
 }
+
+/** undefined = not given, null = clear, otherwise a non-negative number. */
+const parsePricePerUnit = (value: unknown): number | null | undefined => {
+    if (value === undefined) return undefined;
+    if (value === null || value === '') return null;
+    const n = Number(value);
+    if (!Number.isFinite(n) || n < 0) throw new ValidationError('Harga per satuan tidak valid');
+    return n;
+};
 
 export const createStock = async (payload: CreateStockDTO) => {
     const item_name = typeof payload.item_name === 'string' ? payload.item_name.trim() : '';
@@ -29,17 +41,18 @@ export const createStock = async (payload: CreateStockDTO) => {
     if (!unit) throw new ValidationError('unit wajib diisi');
     if (!Number.isInteger(store_id) || store_id < 1) throw new ValidationError('store_id tidak valid');
     if (!Number.isFinite(qty)) throw new ValidationError('qty tidak valid');
+    const price_per_unit = parsePricePerUnit(payload.price_per_unit) ?? null;
 
     return transaction(async (client) => {
         const { rows: [stock] } = await client.query(
-            'INSERT INTO stock (item_name, unit, store_id, qty) VALUES ($1, $2, $3, $4) RETURNING *',
-            [item_name, unit, store_id, qty]
+            'INSERT INTO stock (item_name, unit, store_id, qty, price_per_unit) VALUES ($1, $2, $3, $4, $5) RETURNING *',
+            [item_name, unit, store_id, qty, price_per_unit]
         );
         if (qty !== 0) {
             await client.query(
-                `INSERT INTO stock_history (stock_id, type, qty_change, final_qty, notes)
-                 VALUES ($1, 'IN', $2, $2, 'Stok awal')`,
-                [stock.id, qty]
+                `INSERT INTO stock_history (stock_id, type, qty_change, final_qty, notes, unit_cost)
+                 VALUES ($1, 'IN', $2, $2, 'Stok awal', $3)`,
+                [stock.id, qty, price_per_unit]
             );
         }
         return stock;
@@ -47,11 +60,12 @@ export const createStock = async (payload: CreateStockDTO) => {
 };
 
 /** Rename an item or change its unit. A unit change away from gram is refused while recipes use it. */
-export const updateStock = async (id: number, payload: { item_name?: unknown; unit?: unknown }) => {
+export const updateStock = async (id: number, payload: { item_name?: unknown; unit?: unknown; price_per_unit?: unknown }) => {
     const item_name = payload.item_name === undefined ? undefined : String(payload.item_name).trim();
     const unit = payload.unit === undefined ? undefined : String(payload.unit).trim();
     if (item_name !== undefined && !item_name) throw new ValidationError('item_name tidak boleh kosong');
     if (unit !== undefined && !unit) throw new ValidationError('unit tidak boleh kosong');
+    const price = parsePricePerUnit(payload.price_per_unit);
 
     return transaction(async (client) => {
         const { rows: [current] } = await client.query('SELECT * FROM stock WHERE id = $1 FOR UPDATE', [id]);
@@ -63,9 +77,13 @@ export const updateStock = async (id: number, payload: { item_name?: unknown; un
         }
 
         const { rows: [updated] } = await client.query(
-            `UPDATE stock SET item_name = COALESCE($2, item_name), unit = COALESCE($3, unit), updated_at = CURRENT_TIMESTAMP
+            `UPDATE stock
+             SET item_name = COALESCE($2, item_name),
+                 unit = COALESCE($3, unit),
+                 price_per_unit = CASE WHEN $4 THEN $5 ELSE price_per_unit END,
+                 updated_at = CURRENT_TIMESTAMP
              WHERE id = $1 RETURNING *`,
-            [id, item_name ?? null, unit ?? null]
+            [id, item_name ?? null, unit ?? null, price !== undefined, price ?? null]
         );
         return updated;
     });
@@ -93,7 +111,7 @@ export interface AdjustStockDTO {
     type: StockMovementType;
     is_target?: boolean; // If true, qty_change is treated as the final physical count
     notes?: string;
-    /** Total paid for this stock-in. Sets price_per_unit = total_price / qty added (latest purchase wins). */
+    /** Total paid for this stock-in. Updates price_per_unit to the moving weighted average of stock on hand + this purchase. */
     total_price?: number | null;
 }
 
@@ -117,23 +135,26 @@ export const adjustStock = async (payload: AdjustStockDTO) => {
     }
 
     return transaction(async (client) => {
-        const current = await client.query('SELECT qty FROM stock WHERE id = $1 FOR UPDATE', [payload.stock_id]);
+        const current = await client.query('SELECT qty, price_per_unit FROM stock WHERE id = $1 FOR UPDATE', [payload.stock_id]);
         if (current.rowCount === 0) throw new ValidationError(`Stock dengan id ${payload.stock_id} tidak ditemukan`);
 
         const currentQty = Number(current.rows[0].qty);
+        const currentCost = current.rows[0].price_per_unit === null ? null : Number(current.rows[0].price_per_unit);
         // Physical count mode stores delta = target - current so history lists stay consistent.
         const final_qty = payload.is_target ? qtyInput : currentQty + qtyInput;
         const history_qty_change = final_qty - currentQty;
 
+        // A priced stock-in updates the moving weighted-average cost; everything else keeps it.
         let pricePerUnit: number | null = null;
         if (totalPrice !== null) {
             if (history_qty_change <= 0) throw new ValidationError('Jumlah stok masuk harus > 0 untuk menghitung harga per satuan');
-            pricePerUnit = totalPrice / history_qty_change;
+            pricePerUnit = weightedAverageCost(currentQty, currentCost, history_qty_change, totalPrice / history_qty_change);
         }
+        const unitCost = pricePerUnit ?? currentCost;
 
         await client.query(
-            'INSERT INTO stock_history (stock_id, type, qty_change, final_qty, notes, total_price) VALUES ($1, $2, $3, $4, $5, $6)',
-            [payload.stock_id, payload.type, history_qty_change, final_qty, payload.notes ?? null, totalPrice]
+            'INSERT INTO stock_history (stock_id, type, qty_change, final_qty, notes, total_price, unit_cost) VALUES ($1, $2, $3, $4, $5, $6, $7)',
+            [payload.stock_id, payload.type, history_qty_change, final_qty, payload.notes ?? null, totalPrice, unitCost]
         );
 
         const { rows: [updated] } = await client.query(

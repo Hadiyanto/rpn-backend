@@ -16,8 +16,8 @@ router.get('/stocks', async (req, res) => {
 
 router.post('/stocks', async (req, res) => {
     try {
-        const { item_name, unit, store_id, qty } = req.body;
-        const data = await createStock({ item_name, unit, store_id, qty });
+        const { item_name, unit, store_id, qty, price_per_unit } = req.body;
+        const data = await createStock({ item_name, unit, store_id, qty, price_per_unit });
         res.json({ status: 'ok', data });
     } catch (e: any) {
         sendError(res, e);
@@ -26,8 +26,8 @@ router.post('/stocks', async (req, res) => {
 
 router.put('/stocks/:id', async (req, res) => {
     try {
-        const { item_name, unit } = req.body;
-        const data = await updateStock(Number(req.params.id), { item_name, unit });
+        const { item_name, unit, price_per_unit } = req.body;
+        const data = await updateStock(Number(req.params.id), { item_name, unit, price_per_unit });
         res.json({ status: 'ok', data });
     } catch (e: any) {
         sendError(res, e);

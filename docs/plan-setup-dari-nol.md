@@ -263,3 +263,27 @@ Keputusan user: **tidak** memakai model komponen resep untuk sekarang. Sebagai g
   - Daftar rasa menampilkan "Resep: Kalibata, Depok", dan badge "Belum ada resep di …" / "Belum dijual".
 - Editor resep: "Salin ke Depok" sekarang juga langsung menjual rasa itu di Depok.
 - Frontend: `tsc` bersih, build sukses, lint 176 (+1 warning `<img>` untuk thumbnail, tidak ada error baru). Belum dicek visual di perangkat.
+
+
+## Harga modal di form bahan (2026-09-26) ✅
+Sebelumnya harga modal hanya bisa diisi lewat Stok Masuk → Total Harga Beli, sehingga bahan baru (termasuk yang dibuat otomatis saat salin resep) tidak punya harga dan HPP-nya dihitung Rp 0.
+- Backend: `POST /stocks` dan `PUT /stocks/:id` menerima `price_per_unit` (≥ 0; `null` untuk mengosongkan; tidak dikirim = tidak diubah). Integration test baru (**121 lulus**).
+- `/stock` → Tambah/Edit Bahan punya blok **Harga modal: "Rp [total] untuk [jumlah] [satuan]"** dengan pratinjau "≈ Rp 140 / gram".
+  - Saat tambah bahan, kalau "untuk" dikosongkan, dipakai jumlah stok awal.
+  - Saat edit, harga yang sekarang ditampilkan, dan hanya diubah kalau diisi yang baru.
+- Daftar stok: badge **"Belum ada harga"** (klik untuk langsung mengedit) pada bahan tanpa harga.
+- Cara lama (Stok Masuk + Total Harga Beli) tetap ada; sejak 2026-09-26 harganya dirata-rata (lihat bagian berikut).
+
+## Harga modal rata-rata tertimbang (2026-09-26) ✅
+Masalah: kalau harga beli berikutnya berbeda, harga modal dulu langsung diganti harga pembelian terakhir, sehingga sisa stok lama ikut dinilai dengan harga baru.
+- Rumus (moving weighted average) saat **Stok Masuk + Total Harga Beli**:
+  `harga baru = (sisa qty × harga sekarang + total harga beli) / (sisa qty + qty masuk)`.
+  Kalau sisa stok ≤ 0 atau belum ada harga, dipakai harga pembelian. Dibulatkan 4 desimal (`src/utils/stockCost.ts`).
+- Kolom baru `stock_history.unit_cost` (migration `1789842086778`): biaya per satuan saat tiap mutasi.
+  - Potong otomatis (order) mencatat harga modal saat itu. Biaya order tidak berubah walau harga naik belakangan.
+  - Pembatalan mengembalikan stok **dengan biaya aslinya**, lalu harga dirata-rata ulang.
+  - Order punya field `stock_cost` = total biaya bahan yang benar-benar terpotong.
+- Edit harga modal di form bahan tetap **mengganti** langsung (untuk koreksi). Pembelian baru sebaiknya lewat Stok Masuk.
+- Frontend: pratinjau Stok Masuk menampilkan harga beli per unit dan **harga modal baru (rata-rata)**; riwayat stok menampilkan "@ Rp x/unit" per mutasi.
+- Test: unit `stockCost.test.ts` + integration test skenario beli ulang & batal (**125 lulus**).
+- ⚠️ Prod: jalankan `npm run migrate up` (1789842085778 dan 1789842086778) sebelum deploy backend.
