@@ -1,4 +1,5 @@
 import { Router } from 'express';
+import { sendError } from '../utils/errors';
 import { getWhatsAppService } from '../services/whatsapp.service';
 
 const router = Router();
@@ -14,7 +15,7 @@ router.get('/whatsapp/qr', async (req, res) => {
         res.json(qrData);
     } catch (error: any) {
         console.error('Get QR error:', error);
-        res.status(500).json({ message: error.message });
+        sendError(res, error);
     }
 });
 
@@ -29,7 +30,7 @@ router.post('/whatsapp/regenerate', async (req, res) => {
         res.json(result);
     } catch (error: any) {
         console.error('Regenerate QR error:', error);
-        res.status(500).json({ message: error.message });
+        sendError(res, error);
     }
 });
 
@@ -44,7 +45,7 @@ router.get('/whatsapp/status', async (req, res) => {
         res.json(status);
     } catch (error: any) {
         console.error('Get status error:', error);
-        res.status(500).json({ message: error.message });
+        sendError(res, error);
     }
 });
 
@@ -62,7 +63,7 @@ router.get('/whatsapp/contacts', async (req, res) => {
         });
     } catch (error: any) {
         console.error('Get contacts error:', error);
-        res.status(500).json({ message: error.message });
+        sendError(res, error);
     }
 });
 
@@ -109,7 +110,7 @@ router.post('/whatsapp/send', async (req, res) => {
         });
     } catch (error: any) {
         console.error('Send message error:', error);
-        res.status(500).json({ message: error.message });
+        sendError(res, error);
     }
 });
 

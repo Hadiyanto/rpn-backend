@@ -1,13 +1,32 @@
-import { supabase } from '../config/supabase';
 import { pool, transaction } from '../config/db';
-import { redis } from '../utils/redis';
-import { syncDailyRedisQuota } from './dailyQuota.service';
+import { redis, ttlUntilDate } from '../utils/redis';
+import { BOX_UNITS_SQL, boxUnits, remainingQuota } from '../utils/boxUnits';
+import { dayOfWeek } from '../utils/date';
+import { ConflictError, NotFoundError } from '../utils/errors';
+import { ensureDailyQuotaKey, syncDailyRedisQuota } from './dailyQuota.service';
 import { syncHourlyRedisQuota } from './hourlyQuota.service';
+import { checkVariantSelection, loadVariantCatalog } from './variantRecipe.service';
+import { applyOrderStockSafe, reverseOrderStockSafe } from './stockDeduction.service';
+import type { PoolClient } from 'pg';
+import {
+    ValidationError,
+    type ValidOrderItem,
+    validateCustomerName,
+    validateNote,
+    validateOrderItems,
+    validatePhone,
+    validatePickupDate,
+    validatePickupTime,
+    validateStoreId,
+} from '../utils/validation';
+
+export type BoxType = 'FULL' | 'HALF';
 
 export interface OrderItem {
-    box_type: 'FULL' | 'HALF' | 'HAMPERS';
+    box_type: BoxType;
     name: string;
     qty: number;
+    variant_ids?: number[];
 }
 
 export interface CreateOrderPayload {
@@ -33,65 +52,84 @@ export interface GetOrdersFilter {
     store_id?: number;
 }
 
+/** Checks every item's variant_ids against the live catalog (active, max_flavors, preset rules). */
+const assertVariantSelections = async (items: ValidOrderItem[]) => {
+    if (!items.some(item => item.variant_ids)) return;
+    const catalog = await loadVariantCatalog();
+    items.forEach((item, idx) => {
+        if (item.variant_ids) checkVariantSelection(item.variant_ids, item.box_type, catalog, `Item ${idx + 1}`);
+    });
+};
+
+/** Inserts order_items (+ their order_item_variants) for an order inside an open transaction. */
+const insertOrderItems = async (client: PoolClient, orderId: number, items: ValidOrderItem[]) => {
+    for (const item of items) {
+        const { rows: [row] } = await client.query(
+            'INSERT INTO order_items (order_id, box_type, name, qty) VALUES ($1, $2, $3, $4) RETURNING id',
+            [orderId, item.box_type, item.name, item.qty]
+        );
+        for (const variantId of item.variant_ids ?? []) {
+            await client.query(
+                'INSERT INTO order_item_variants (order_item_id, variant_id) VALUES ($1, $2)',
+                [row.id, variantId]
+            );
+        }
+    }
+};
+
+/** Adds `variant_ids` to every item of the given orders (empty array for legacy items). */
+const attachVariantIds = async <T extends { items?: { id: number }[] | null }>(orders: T[]): Promise<T[]> => {
+    const itemIds = orders.flatMap(o => (o.items ?? []).map(i => i.id));
+    if (itemIds.length === 0) return orders;
+
+    const { rows } = await pool.query(
+        'SELECT order_item_id, variant_id FROM order_item_variants WHERE order_item_id = ANY($1::int[]) ORDER BY id',
+        [itemIds]
+    );
+    const byItem = new Map<number, number[]>();
+    for (const r of rows) byItem.set(r.order_item_id, [...(byItem.get(r.order_item_id) ?? []), r.variant_id]);
+
+    for (const order of orders) {
+        for (const item of order.items ?? []) {
+            (item as { variant_ids?: number[] }).variant_ids = byItem.get(item.id) ?? [];
+        }
+    }
+    return orders;
+};
+
 export const createOrder = async (payload: CreateOrderPayload) => {
-    const { customer_name, customer_phone, pesanan, pickup_date, pickup_time, note, payment_method, store_id, delivery_method, delivery_lat, delivery_lng, delivery_address, delivery_driver_note, delivery_area_id } = payload;
+    const { payment_method, delivery_method, delivery_lat, delivery_lng, delivery_address, delivery_driver_note, delivery_area_id } = payload;
 
-    if (!store_id) {
-        throw new Error('store_id tidak boleh kosong');
-    }
+    // Validate everything before touching Redis: a negative qty would otherwise
+    // *increase* the remaining quota via incrbyfloat.
+    const store_id = validateStoreId(payload.store_id);
+    const customer_name = validateCustomerName(payload.customer_name);
+    const customer_phone = validatePhone(payload.customer_phone);
+    const pesanan = validateOrderItems(payload.pesanan);
+    const pickup_date = validatePickupDate(payload.pickup_date);
+    const pickup_time = validatePickupTime(payload.pickup_time);
+    const note = validateNote(payload.note);
+    await assertVariantSelections(pesanan);
 
-    if (!pesanan || pesanan.length === 0) {
-        throw new Error('pesanan tidak boleh kosong');
-    }
-
-    let requestedBoxQty = 0;
-    let requestedHampersQty = 0;
-    for (const item of pesanan) {
-        if (item.box_type !== 'FULL' && item.box_type !== 'HALF' && item.box_type !== 'HAMPERS') {
-            throw new Error(`box_type harus FULL, HALF, atau HAMPERS, got: ${item.box_type}`);
-        }
-        if (item.box_type === 'HALF') {
-            requestedBoxQty += (item.qty * 0.5);
-        } else if (item.box_type === 'FULL') {
-            requestedBoxQty += item.qty;
-        } else if (item.box_type === 'HAMPERS') {
-            requestedHampersQty += item.qty;
-        }
-    }
+    const requestedBoxQty = boxUnits(pesanan);
 
     // --- 1. DAILY QUOTA VALIDATION (REDIS ATOMIC DECREMENT) ---
     // If no requested items, skip
     let reservedBox = false;
-    let reservedHampers = false;
     let reservedHourlyBox = false;
-    let reservedHourlyHampers = false;
     let hourStr = '';
 
     try {
         if (requestedBoxQty > 0) {
+            await ensureDailyQuotaKey(store_id, pickup_date);
             const remainingBoxStr = await redis.incrbyfloat(`quota:${store_id}:${pickup_date}`, -requestedBoxQty);
             const remainingBox = parseFloat(remainingBoxStr as unknown as string);
             if (remainingBox < 0) {
                 // Revert atomic decrement if we've gone below zero
                 await redis.incrbyfloat(`quota:${store_id}:${pickup_date}`, requestedBoxQty);
-                throw new Error(`MOHON MAAF: Kuota Box untuk tanggal ${pickup_date} sudah penuh.`);
+                throw new ConflictError(`MOHON MAAF: Kuota Box untuk tanggal ${pickup_date} sudah penuh.`);
             }
             reservedBox = true;
-        }
-
-        if (requestedHampersQty > 0) {
-            const remainingHampersStr = await redis.incrbyfloat(`quota:hampers:${store_id}:${pickup_date}`, -requestedHampersQty);
-            const remainingHampers = parseFloat(remainingHampersStr as unknown as string);
-            if (remainingHampers < 0) {
-                // Revert atomic decrement
-                await redis.incrbyfloat(`quota:hampers:${store_id}:${pickup_date}`, requestedHampersQty);
-                // Also revert box if we reserved earlier but failed hampers
-                if (reservedBox) {
-                    await redis.incrbyfloat(`quota:${store_id}:${pickup_date}`, requestedBoxQty);
-                }
-                throw new Error(`MOHON MAAF: Kuota Hampers untuk tanggal ${pickup_date} sudah penuh.`);
-            }
-            reservedHampers = true;
         }
 
         // --- 2. HOURLY QUOTA VALIDATION (REDIS ATOMIC DECREMENT) ---
@@ -105,12 +143,12 @@ export const createOrder = async (payload: CreateOrderPayload) => {
             const storeRes = await pool.query('SELECT open_time FROM stores WHERE id = $1', [store_id]);
             const openTime = storeRes.rows[0]?.open_time;
             if (openTime && hourStr < openTime) {
-                throw new Error(`MOHON MAAF: Toko baru buka jam ${openTime}. Silakan pilih jam lain.`);
+                throw new ConflictError(`MOHON MAAF: Toko baru buka jam ${openTime}. Silakan pilih jam lain.`);
             }
 
             // Fetch base capacity and active status from DB
             const hourlyRes = await pool.query(`
-                SELECT qty, hampers_qty
+                SELECT qty
                 FROM hourly_quota
                 WHERE store_id = $1 AND time_str = $2 AND is_active = true
             `, [store_id, hourStr]);
@@ -119,21 +157,17 @@ export const createOrder = async (payload: CreateOrderPayload) => {
             // validation entirely — the daily quota check above is the only cap that applies.
             if (hourlyRes.rowCount && hourlyRes.rowCount > 0) {
                 const maxHourly = parseFloat(hourlyRes.rows[0].qty);
-                const maxHourlyHampers = parseFloat(hourlyRes.rows[0].hampers_qty || '0');
 
                 // Warm up Redis Hourly Cache if it doesn't exist.
                 // Uses SET NX so that if two requests race on a cold cache, only the first
                 // SET actually lands — the loser's SET becomes a no-op instead of clobbering
                 // a decrement the winner may have already applied.
-                const [rHourlyBox, rHourlyHampers] = await redis.mget(
-                    `hourly:${store_id}:${pickup_date}:${hourStr}`,
-                    `hourly:hampers:${store_id}:${pickup_date}:${hourStr}`
-                );
+                const rHourlyBox = await redis.get(`hourly:${store_id}:${pickup_date}:${hourStr}`);
 
                 if (rHourlyBox === null) {
                     const usedHourlyRes = await pool.query(`
                         SELECT
-                            COALESCE(SUM(CASE WHEN oi.box_type = 'HALF' THEN oi.qty * 0.5 WHEN oi.box_type = 'FULL' THEN oi.qty ELSE 0 END), 0) as used_box
+                            COALESCE(SUM(${BOX_UNITS_SQL}), 0) as used_box
                         FROM order_items oi
                         JOIN orders o ON oi.order_id = o.id
                         WHERE o.pickup_date = $1
@@ -142,22 +176,7 @@ export const createOrder = async (payload: CreateOrderPayload) => {
                         AND o.status != 'CANCELLED'
                     `, [pickup_date, store_id, `${pickup_time.split(':')[0]}:%`]);
                     const usedHourlyBox = parseFloat(usedHourlyRes.rows[0].used_box);
-                    await redis.set(`hourly:${store_id}:${pickup_date}:${hourStr}`, Math.max(0, maxHourly - usedHourlyBox), { nx: true });
-                }
-
-                if (rHourlyHampers === null) {
-                    const usedHourlyRes = await pool.query(`
-                        SELECT
-                            COALESCE(SUM(CASE WHEN oi.box_type = 'HAMPERS' THEN oi.qty ELSE 0 END), 0) as used_hampers
-                        FROM order_items oi
-                        JOIN orders o ON oi.order_id = o.id
-                        WHERE o.pickup_date = $1
-                        AND o.store_id = $2
-                        AND o.pickup_time LIKE $3
-                        AND o.status != 'CANCELLED'
-                    `, [pickup_date, store_id, `${pickup_time.split(':')[0]}:%`]);
-                    const usedHourlyHampers = parseFloat(usedHourlyRes.rows[0].used_hampers);
-                    await redis.set(`hourly:hampers:${store_id}:${pickup_date}:${hourStr}`, Math.max(0, maxHourlyHampers - usedHourlyHampers), { nx: true });
+                    await redis.set(`hourly:${store_id}:${pickup_date}:${hourStr}`, remainingQuota(maxHourly, usedHourlyBox), { nx: true, ex: ttlUntilDate(pickup_date) });
                 }
 
                 // Perform Atomic Decrements for Hourly
@@ -166,28 +185,15 @@ export const createOrder = async (payload: CreateOrderPayload) => {
                     const remainingHourlyBox = parseFloat(remainingHourlyBoxStr as unknown as string);
                     if (remainingHourlyBox < 0) {
                         await redis.incrbyfloat(`hourly:${store_id}:${pickup_date}:${hourStr}`, requestedBoxQty);
-                        throw new Error(`MOHON MAAF: Kuota Jam ${hourStr} di tanggal ${pickup_date} sudah penuh. Silakan pilih jam lain.`);
+                        throw new ConflictError(`MOHON MAAF: Kuota Jam ${hourStr} di tanggal ${pickup_date} sudah penuh. Silakan pilih jam lain.`);
                     }
                     reservedHourlyBox = true;
-                }
-
-                if (requestedHampersQty > 0) {
-                    const remainingHourlyHampersStr = await redis.incrbyfloat(`hourly:hampers:${store_id}:${pickup_date}:${hourStr}`, -requestedHampersQty);
-                    const remainingHourlyHampers = parseFloat(remainingHourlyHampersStr as unknown as string);
-                    if (remainingHourlyHampers < 0) {
-                        await redis.incrbyfloat(`hourly:hampers:${store_id}:${pickup_date}:${hourStr}`, requestedHampersQty);
-                        if (reservedHourlyBox) {
-                            await redis.incrbyfloat(`hourly:${store_id}:${pickup_date}:${hourStr}`, requestedBoxQty);
-                        }
-                        throw new Error(`MOHON MAAF: Kuota Jam Hampers ${hourStr} di tanggal ${pickup_date} sudah penuh. Silakan pilih jam lain.`);
-                    }
-                    reservedHourlyHampers = true;
                 }
             }
         }
 
         // --- 3. INSERT ORDER (short transaction: just the writes) ---
-        return await transaction(async (client) => {
+        const created = await transaction(async (client) => {
             const orderRes = await client.query(`
             INSERT INTO orders (
                 customer_name, customer_phone, pickup_date, pickup_time, note, status, payment_method, store_id,
@@ -213,143 +219,123 @@ export const createOrder = async (payload: CreateOrderPayload) => {
             ]);
 
             const order = orderRes.rows[0];
-            const orderItems = [];
-
-            // 5. Insert order items
-            for (const item of pesanan) {
-                await client.query(`
-                INSERT INTO order_items (order_id, box_type, name, qty)
-                VALUES ($1, $2, $3, $4)
-            `, [order.id, item.box_type, item.name, item.qty]);
-                orderItems.push(item);
-            }
-            return { ...order, items: orderItems };
+            await insertOrderItems(client, order.id, pesanan);
+            return { ...order, items: pesanan };
         });
+
+        // --- 4. STOCK: deduct raw materials right away (UNPAID included). Runs after commit and
+        // never throws, so a stock/recipe problem can never fail or roll back the order.
+        await applyOrderStockSafe(created.id);
+
+        return created;
     } catch (e) {
         // If the database transaction failed for any reason AFTER we successfully reserved in Redis,
         // we must rollback our Redis cache decrement immediately.
         if (reservedBox) {
             await redis.incrbyfloat(`quota:${store_id}:${pickup_date}`, requestedBoxQty);
         }
-        if (reservedHampers) {
-            await redis.incrbyfloat(`quota:hampers:${store_id}:${pickup_date}`, requestedHampersQty);
-        }
 
         // Also rollback hourly quotas if they were reserved and then DB failed
         if (reservedHourlyBox && hourStr) {
             await redis.incrbyfloat(`hourly:${store_id}:${pickup_date}:${hourStr}`, requestedBoxQty);
         }
-        if (reservedHourlyHampers && hourStr) {
-            await redis.incrbyfloat(`hourly:hampers:${store_id}:${pickup_date}:${hourStr}`, requestedHampersQty);
-        }
 
         throw e;
     }
 };
+// Order row + items: [{ id, box_type, name, qty }] — the shape the supabase-js embed returned.
+const ORDER_WITH_ITEMS_COLUMNS = `
+    o.*,
+    COALESCE(
+        json_agg(json_build_object('id', oi.id, 'box_type', oi.box_type, 'name', oi.name, 'qty', oi.qty) ORDER BY oi.id)
+            FILTER (WHERE oi.id IS NOT NULL),
+        '[]'
+    ) AS items`;
+
 export const getOrders = async (filters?: GetOrdersFilter) => {
-    let query = supabase
-        .from('orders')
-        .select(`
-            *,
-            items:order_items (
-                id,
-                box_type,
-                name,
-                qty
-            )
-        `)
-        .order('pickup_date', { ascending: true });
-
+    const where: string[] = [];
+    const params: unknown[] = [];
     if (filters?.status) {
-        query = query.eq('status', filters.status.toUpperCase());
+        params.push(filters.status.toUpperCase());
+        where.push(`o.status = $${params.length}`);
     }
-
     if (filters?.store_id) {
-        query = query.eq('store_id', filters.store_id);
+        params.push(filters.store_id);
+        where.push(`o.store_id = $${params.length}`);
     }
 
-    // FIX: Filter by day name using DB DOW (0=Sunday ... 6=Saturday)
+    const { rows: data } = await pool.query(`
+        SELECT ${ORDER_WITH_ITEMS_COLUMNS}
+        FROM orders o
+        LEFT JOIN order_items oi ON oi.order_id = o.id
+        ${where.length > 0 ? `WHERE ${where.join(' AND ')}` : ''}
+        GROUP BY o.id
+        ORDER BY o.pickup_date ASC, o.id ASC
+    `, params);
+
+    // Day-name filter, computed from the calendar date itself so it doesn't depend on the
+    // server timezone (the old getDay() on a +07:00 timestamp was off by one on a UTC server).
     if (filters?.day) {
-        const dayMap: Record<string, number> = {
-            'MINGGU': 0, 'SENIN': 1, 'SELASA': 2, 'RABU': 3,
-            'KAMIS': 4, 'JUMAT': 5, 'SABTU': 6,
-        };
-        const dowNum = dayMap[filters.day.toUpperCase()];
-        if (dowNum !== undefined) {
-            // Supabase doesn't directly expose DOW filter, so use raw filter via cast
-            query = (query as any).filter('pickup_date', 'ov', `{${filters.day}}`)
-        }
+        const dayNames = ['MINGGU', 'SENIN', 'SELASA', 'RABU', 'KAMIS', 'JUMAT', 'SABTU'];
+        return attachVariantIds(data.filter(order => dayNames[dayOfWeek(order.pickup_date)] === filters.day!.toUpperCase()));
     }
 
-    const { data, error } = await query;
-    if (error) throw error;
-
-    // Fallback in-memory day filter (handles timezone correctly)
-    if (filters?.day && data) {
-        const dayMap: Record<number, string> = {
-            0: 'MINGGU', 1: 'SENIN', 2: 'SELASA', 3: 'RABU',
-            4: 'KAMIS', 5: 'JUMAT', 6: 'SABTU',
-        };
-        return data.filter((order) => {
-            const d = new Date(`${order.pickup_date}T00:00:00+07:00`);
-            return dayMap[d.getDay()] === filters.day!.toUpperCase();
-        });
-    }
-
-    return data ?? [];
+    return attachVariantIds(data);
 };
 
 export const getOrderById = async (id: number) => {
-    const { data, error } = await supabase
-        .from('orders')
-        .select(`
-            *,
-            items:order_items (
-                id,
-                box_type,
-                name,
-                qty
-            )
-        `)
-        .eq('id', id)
-        .single();
+    // Same shape as the previous supabase-js query: the order row plus
+    // items: [{ id, box_type, name, qty }], now also with variant_ids per item.
+    const { rows } = await pool.query(`
+        SELECT ${ORDER_WITH_ITEMS_COLUMNS}
+        FROM orders o
+        LEFT JOIN order_items oi ON oi.order_id = o.id
+        WHERE o.id = $1
+        GROUP BY o.id
+    `, [id]);
 
-    if (error) throw error;
-    return data;
+    // supabase .single() threw when no row matched; callers rely on that.
+    if (rows.length === 0) throw new NotFoundError(`Order dengan id ${id} tidak ditemukan`);
+    const [withVariants] = await attachVariantIds(rows);
+    return withVariants;
 };
 
 const VALID_STATUSES = ['UNPAID', 'PAID', 'CONFIRMED', 'DONE', 'CANCELLED'] as const;
 export type OrderStatus = typeof VALID_STATUSES[number];
 
-export const updateOrderStatus = async (id: number, status: string) => {
+export const updateOrderStatus = async (id: number, status: string) => (await changeOrderStatus(id, status)).order;
+
+/** Status update that also reports the previous status, so callers can run change-only side effects. */
+export const changeOrderStatus = async (id: number, status: string) => {
     const upperStatus = status.toUpperCase();
 
     if (!VALID_STATUSES.includes(upperStatus as OrderStatus)) {
-        throw new Error(`Status tidak valid. Pilihan: ${VALID_STATUSES.join(', ')}`);
+        throw new ValidationError(`Status tidak valid. Pilihan: ${VALID_STATUSES.join(', ')}`);
     }
 
     const oldOrder = await getOrderById(id);
 
-    const { data, error } = await supabase
-        .from('orders')
-        .update({ status: upperStatus, updated_at: new Date().toISOString() })
-        .eq('id', id)
-        .select()
-        .single();
+    const { rows } = await pool.query(
+        'UPDATE orders SET status = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2 RETURNING *',
+        [upperStatus, id]
+    );
+    const data = rows[0];
+    if (!data) throw new NotFoundError(`Order dengan id ${id} tidak ditemukan`);
 
-    if (error) throw error;
-    if (!data) throw new Error(`Order dengan id ${id} tidak ditemukan`);
+    const wasCancelled = oldOrder.status === 'CANCELLED';
+    const isCancelled = upperStatus === 'CANCELLED';
 
     // If order was cancelled or uncancelled, sync quotas to reclaim or use slots
-    if (oldOrder && oldOrder.pickup_date) {
-        if ((oldOrder.status === 'CANCELLED' && upperStatus !== 'CANCELLED') ||
-            (oldOrder.status !== 'CANCELLED' && upperStatus === 'CANCELLED')) {
-            await syncDailyRedisQuota(oldOrder.store_id, oldOrder.pickup_date);
-            await syncHourlyRedisQuota(oldOrder.pickup_date, oldOrder.store_id);
-        }
+    if (oldOrder.pickup_date && wasCancelled !== isCancelled) {
+        await syncDailyRedisQuota(oldOrder.store_id, oldOrder.pickup_date);
+        await syncHourlyRedisQuota(oldOrder.pickup_date, oldOrder.store_id);
     }
 
-    return data;
+    // K1: cancelling gives the raw materials back; un-cancelling takes them again.
+    if (!wasCancelled && isCancelled) await reverseOrderStockSafe(id);
+    if (wasCancelled && !isCancelled) await applyOrderStockSafe(id);
+
+    return { order: data, previousStatus: oldOrder.status as string };
 };
 
 export interface UpdateOrderPayload {
@@ -363,10 +349,24 @@ export interface UpdateOrderPayload {
 }
 
 export const updateOrder = async (id: number, payload: UpdateOrderPayload) => {
-    const { customer_name, pesanan, pickup_date, pickup_time, note, payment_method } = payload;
+    const { payment_method } = payload;
     const oldOrder = await getOrderById(id);
 
-    // 1. Update order header
+    // Admin edits may keep an order's existing (possibly past) date, but a changed
+    // date must follow the same rules as a new order.
+    const customer_name = payload.customer_name === undefined ? undefined : validateCustomerName(payload.customer_name);
+    const pesanan = payload.pesanan && payload.pesanan.length > 0 ? validateOrderItems(payload.pesanan) : undefined;
+    const pickup_date = payload.pickup_date === undefined
+        ? undefined
+        : validatePickupDate(payload.pickup_date, { allowPast: payload.pickup_date === oldOrder?.pickup_date });
+    const pickup_time = payload.pickup_time === undefined || payload.pickup_time === null
+        ? payload.pickup_time
+        : (validatePickupTime(payload.pickup_time) ?? null);
+    const note = validateNote(payload.note);
+    if (pesanan) await assertVariantSelections(pesanan);
+
+    // 1+2. Header update and item replacement in ONE transaction, so a failed item insert
+    // can never leave the header changed with the old items (or no items at all).
     const updateFields: Record<string, unknown> = {};
     if (customer_name !== undefined) updateFields.customer_name = customer_name;
     if (pickup_date !== undefined) updateFields.pickup_date = pickup_date;
@@ -374,36 +374,35 @@ export const updateOrder = async (id: number, payload: UpdateOrderPayload) => {
     if (note !== undefined) updateFields.note = note;
     if (payment_method !== undefined) updateFields.payment_method = payment_method;
     if (payload.transfer_img_url !== undefined) updateFields.transfer_img_url = payload.transfer_img_url;
-    updateFields.updated_at = new Date().toISOString();
 
-    const { data: order, error: orderError } = await supabase
-        .from('orders')
-        .update(updateFields)
-        .eq('id', id)
-        .select()
-        .single();
-
-    if (orderError) throw orderError;
-    if (!order) throw new Error(`Order dengan id ${id} tidak ditemukan`);
-
-    // 2. Replace items atomically if provided
-    if (pesanan && pesanan.length > 0) {
-        for (const item of pesanan) {
-            if (item.box_type !== 'FULL' && item.box_type !== 'HALF' && item.box_type !== 'HAMPERS') {
-                throw new Error(`box_type harus FULL, HALF, atau HAMPERS, got: ${item.box_type}`);
-            }
+    const order = await transaction(async (client) => {
+        const locked = await client.query('SELECT id FROM orders WHERE id = $1 FOR UPDATE', [id]);
+        if (locked.rowCount === 0) {
+            throw new NotFoundError(`Order dengan id ${id} tidak ditemukan`);
         }
 
-        // FIX: Wrap delete + insert in a transaction to ensure atomicity
-        await transaction(async (client) => {
+        // Column names come from the fixed list above, never from user input.
+        const columns = Object.keys(updateFields);
+        const setClause = [...columns.map((col, i) => `${col} = $${i + 2}`), 'updated_at = CURRENT_TIMESTAMP'].join(', ');
+        const orderRes = await client.query(
+            `UPDATE orders SET ${setClause} WHERE id = $1 RETURNING *`,
+            [id, ...columns.map(col => updateFields[col])]
+        );
+
+        if (pesanan) {
+            // order_item_variants rows go with their items (ON DELETE CASCADE).
             await client.query('DELETE FROM order_items WHERE order_id = $1', [id]);
-            for (const item of pesanan) {
-                await client.query(
-                    'INSERT INTO order_items (order_id, box_type, name, qty) VALUES ($1, $2, $3, $4)',
-                    [id, item.box_type, item.name, item.qty]
-                );
-            }
-        });
+            await insertOrderItems(client, id, pesanan);
+        }
+
+        return orderRes.rows[0];
+    });
+
+    // K1: edited items → give back the old deduction and deduct for the new items.
+    // (applyOrderStock itself skips cancelled orders.)
+    if (pesanan) {
+        await reverseOrderStockSafe(id);
+        await applyOrderStockSafe(id);
     }
 
     // Forces generic recalculation of quota usage to prevent Redis ghost slots
@@ -417,23 +416,55 @@ export const updateOrder = async (id: number, payload: UpdateOrderPayload) => {
         await syncHourlyRedisQuota(pickup_date, oldOrder.store_id);
     }
 
-    if (pesanan && pesanan.length > 0) {
+    if (pesanan) {
         return { ...order, items: pesanan };
     }
     return order;
 };
 
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * Customer-facing view of an order, looked up by its unguessable public_token.
+ * Only what the "bukti transfer" page needs — no phone number, address or coordinates.
+ */
+export const getPublicOrder = async (token: string) => {
+    const order = await getOrderById(await getOrderIdByPublicToken(token));
+    return {
+        id: order.id,
+        customer_name: order.customer_name,
+        pickup_date: order.pickup_date,
+        pickup_time: order.pickup_time,
+        status: order.status,
+        payment_method: order.payment_method,
+        store_id: order.store_id,
+        has_transfer_img: !!order.transfer_img_url,
+        items: order.items.map((i: { box_type: string; name: string; qty: number }) => ({ box_type: i.box_type, name: i.name, qty: i.qty })),
+    };
+};
+
+/** Resolves a public token to the internal order id (404 when unknown). */
+export const getOrderIdByPublicToken = async (token: string): Promise<number> => {
+    if (!UUID_RE.test(token)) throw new NotFoundError('Order tidak ditemukan');
+    const { rows } = await pool.query('SELECT id FROM orders WHERE public_token = $1', [token]);
+    if (rows.length === 0) throw new NotFoundError('Order tidak ditemukan');
+    return rows[0].id;
+};
+
+// Transfer proofs must be images we uploaded ourselves (see POST /upload-image).
+export const assertTransferImgUrl = (url: unknown): string => {
+    if (typeof url !== 'string' || !/^https:\/\/res\.cloudinary\.com\//.test(url)) {
+        throw new ValidationError('transfer_img_url harus berupa URL gambar hasil upload');
+    }
+    return url;
+};
+
 export const updatePaymentMethod = async (id: number, payment_method: string | null) => {
-    const { data, error } = await supabase
-        .from('orders')
-        .update({ payment_method, updated_at: new Date().toISOString() })
-        .eq('id', id)
-        .select()
-        .single();
-
-    if (error) throw error;
-    if (!data) throw new Error(`Order dengan id ${id} tidak ditemukan`);
-
+    const { rows: [data] } = await pool.query(
+        'UPDATE orders SET payment_method = $2, updated_at = CURRENT_TIMESTAMP WHERE id = $1 RETURNING *',
+        [id, payment_method]
+    );
+    if (!data) throw new NotFoundError(`Order dengan id ${id} tidak ditemukan`);
     return data;
 };
 
@@ -443,7 +474,7 @@ export const updateTransferImgUrl = async (id: number, transfer_img_url: string 
         const res = await client.query('SELECT id FROM orders WHERE id = $1 FOR UPDATE', [id]);
 
         if (res.rowCount === 0) {
-            throw new Error(`Order dengan id ${id} tidak ditemukan`);
+            throw new NotFoundError(`Order dengan id ${id} tidak ditemukan`);
         }
 
         // 2. Perform the update safely within the lock

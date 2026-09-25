@@ -1,14 +1,18 @@
 import { Router } from 'express';
+import { sendError } from '../utils/errors';
 import { getVariants, createVariant, updateVariant, deleteVariant } from '../services/variant.service';
 import { redis } from '../config/redis';
 
 const router = Router();
 
+// Bump the version whenever the variant row shape changes so stale cached lists are ignored.
+export const VARIANT_CACHE_KEY = 'variant_list:v2';
+
 
 
 router.get('/variants', async (req, res) => {
     try {
-        const cacheKey = 'variant_list';
+        const cacheKey = VARIANT_CACHE_KEY;
         let data: any = await redis.get(cacheKey);
 
         if (!data) {
@@ -23,7 +27,7 @@ router.get('/variants', async (req, res) => {
 
         res.json({ status: 'ok', data });
     } catch (e: any) {
-        res.status(500).json({ status: 'error', message: e.message });
+        sendError(res, e);
     }
 });
 
@@ -34,10 +38,10 @@ router.post('/variants', async (req, res) => {
             return res.status(400).json({ status: 'error', message: 'variant_name is required' });
         }
         const data = await createVariant(variant_name, is_active, image_url);
-        await redis.del('variant_list');
+        await redis.del(VARIANT_CACHE_KEY);
         res.json({ status: 'ok', data });
     } catch (e: any) {
-        res.status(500).json({ status: 'error', message: e.message });
+        sendError(res, e);
     }
 });
 
@@ -46,10 +50,10 @@ router.put('/variants/:id', async (req, res) => {
         const id = parseInt(req.params.id);
         const { variant_name, is_active, image_url, store_ids } = req.body;
         const data = await updateVariant(id, { variant_name, is_active, image_url, store_ids });
-        await redis.del('variant_list');
+        await redis.del(VARIANT_CACHE_KEY);
         res.json({ status: 'ok', data });
     } catch (e: any) {
-        res.status(500).json({ status: 'error', message: e.message });
+        sendError(res, e);
     }
 });
 
@@ -57,10 +61,10 @@ router.delete('/variants/:id', async (req, res) => {
     try {
         const id = parseInt(req.params.id);
         await deleteVariant(id);
-        await redis.del('variant_list');
+        await redis.del(VARIANT_CACHE_KEY);
         res.json({ status: 'ok', message: 'Variant deleted' });
     } catch (e: any) {
-        res.status(500).json({ status: 'error', message: e.message });
+        sendError(res, e);
     }
 });
 

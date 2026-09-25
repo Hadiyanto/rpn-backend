@@ -1,48 +1,37 @@
-import { supabase } from '../config/supabase';
 import { pool, transaction } from '../config/db';
 import { redis, ttlUntilDate } from '../utils/redis';
+import { BOX_UNITS_SQL, remainingQuota } from '../utils/boxUnits';
+import { todayWIB } from '../utils/validation';
 
 export interface HourlyQuota {
     id: number;
     time_str: string;
     qty: number;
-    hampers_qty: number;
     is_active: boolean;
     store_id: number;
 }
 
 export const getHourlyQuotas = async (store_id: number): Promise<HourlyQuota[]> => {
-    const { data: rows, error } = await supabase
-        .from('hourly_quota')
-        .select('id, time_str, qty, hampers_qty, is_active, store_id')
-        .eq('store_id', store_id)
-        .order('time_str', { ascending: true });
+    const { rows } = await pool.query(
+        'SELECT id, time_str, qty, is_active, store_id FROM hourly_quota WHERE store_id = $1 ORDER BY time_str ASC',
+        [store_id]
+    );
 
-    if (error) throw new Error(`Supabase query failed: ${error.message}`);
-
-    return (rows || []).map(row => ({
+    return rows.map(row => ({
         ...row,
         qty: parseInt(row.qty, 10),
-        hampers_qty: parseInt(row.hampers_qty || '0', 10),
         is_active: row.is_active
     }));
 };
 
-export const getHourlyAvailability = async (date: string, store_id: number): Promise<(HourlyQuota & { used_qty: number, remaining_qty: number, used_hampers_qty: number, remaining_hampers_qty: number })[]> => {
-    const { data: rows, error } = await supabase
-        .from('hourly_quota')
-        .select('id, time_str, qty, hampers_qty, is_active, store_id')
-        .eq('store_id', store_id)
-        .order('time_str', { ascending: true });
-
-    if (error) throw new Error(`Supabase query failed: ${error.message}`);
-    if (!rows) return [];
+export const getHourlyAvailability = async (date: string, store_id: number): Promise<(HourlyQuota & { used_qty: number, remaining_qty: number })[]> => {
+    const { rows } = await pool.query(
+        'SELECT id, time_str, qty, is_active, store_id FROM hourly_quota WHERE store_id = $1 ORDER BY time_str ASC',
+        [store_id]
+    );
 
     // Fetch all Redis keys at once for this date's time slots
-    const keys = rows.flatMap(row => [
-        `hourly:${store_id}:${date}:${row.time_str}`,
-        `hourly:hampers:${store_id}:${date}:${row.time_str}`
-    ]);
+    const keys = rows.map(row => `hourly:${store_id}:${date}:${row.time_str}`);
 
     let redisVals: (string | number | null)[] = [];
     if (keys.length > 0) {
@@ -66,24 +55,16 @@ export const getHourlyAvailability = async (date: string, store_id: number): Pro
 
     return rows.map((row, i) => {
         const qty = parseFloat(row.qty);
-        const hampers_qty = parseFloat(row.hampers_qty || '0');
 
         let remaining_qty = qty;
-        let remaining_hampers_qty = hampers_qty;
 
-        const rQty = redisVals[i * 2];
-        const rHampersQty = redisVals[i * 2 + 1];
+        const rQty = redisVals[i];
 
         if (rQty !== null && rQty !== undefined) {
             remaining_qty = Math.max(0, Number(rQty));
         }
 
-        if (rHampersQty !== null && rHampersQty !== undefined) {
-            remaining_hampers_qty = Math.max(0, Number(rHampersQty));
-        }
-
         const used_qty = Math.max(0, qty - remaining_qty);
-        const used_hampers_qty = Math.max(0, hampers_qty - remaining_hampers_qty);
 
         return {
             ...row,
@@ -91,33 +72,34 @@ export const getHourlyAvailability = async (date: string, store_id: number): Pro
             used_qty,
             is_active: row.is_active,
             remaining_qty,
-            hampers_qty,
-            used_hampers_qty,
-            remaining_hampers_qty
         };
     });
 };
 
 // Write operations still use transaction for data integrity
-export const upsertHourlyQuota = async (time_str: string, qty: number, store_id: number, hampers_qty: number = 0, is_active: boolean = true) => {
+export const upsertHourlyQuota = async (time_str: string, qty: number, store_id: number, is_active: boolean = true) => {
     const res = await transaction(async (client) => {
         return client.query(`
-            INSERT INTO hourly_quota (time_str, qty, hampers_qty, is_active, store_id)
-            VALUES ($1, $2, $3, $4, $5)
+            INSERT INTO hourly_quota (time_str, qty, is_active, store_id)
+            VALUES ($1, $2, $3, $4)
             ON CONFLICT (store_id, time_str) DO UPDATE
-            SET qty = EXCLUDED.qty, hampers_qty = EXCLUDED.hampers_qty, is_active = EXCLUDED.is_active, updated_at = current_timestamp
+            SET qty = EXCLUDED.qty, is_active = EXCLUDED.is_active, updated_at = current_timestamp
             RETURNING *
-        `, [time_str, qty, hampers_qty, is_active, store_id]);
+        `, [time_str, qty, is_active, store_id]);
     });
 
-    // Invalidate the base cache keys
+    // Recompute the per-date remaining counters for every upcoming date of this store,
+    // otherwise a changed slot capacity only shows up once the old keys expire.
     try {
-        await redis.set(`hourly:base:${store_id}:${time_str}`, qty);
-        await redis.set(`hourly:hampers:base:${store_id}:${time_str}`, hampers_qty);
-        // Note: We cannot easily invalidate all specific hourly date keys here.
-        // Their DB fallbacks will eventually correct them if they expire, but if they exist, they will retain the old Remaining value until an order is placed.
+        const datesRes = await pool.query(
+            'SELECT date::text AS date FROM daily_quota WHERE store_id = $1 AND date >= $2::date',
+            [store_id, todayWIB()]
+        );
+        for (const { date } of datesRes.rows) {
+            await syncHourlyRedisQuota(date, store_id);
+        }
     } catch (err) {
-        console.error('Failed to update base hourly quota in Redis', err);
+        console.error('Failed to resync hourly quota in Redis after upsert', err);
     }
 
     return res.rows[0];
@@ -136,28 +118,19 @@ export const syncHourlyRedisQuota = async (date: string, store_id: number) => {
             SELECT
                 hq.time_str,
                 hq.qty,
-                hq.hampers_qty,
-                COALESCE(SUM(CASE WHEN oi.box_type IN ('FULL', 'HALF') THEN oi.qty ELSE 0 END), 0) as used_qty,
-                COALESCE(SUM(CASE WHEN oi.box_type = 'HAMPERS' THEN oi.qty ELSE 0 END), 0) as used_hampers_qty
+                COALESCE(SUM(${BOX_UNITS_SQL}), 0) as used_qty
             FROM hourly_quota hq
             LEFT JOIN orders o ON o.pickup_date = $1 AND o.store_id = hq.store_id AND o.pickup_time LIKE (substring(hq.time_str, 1, 2) || '%') AND o.status != 'CANCELLED'
             LEFT JOIN order_items oi ON oi.order_id = o.id
             WHERE hq.store_id = $2
-            GROUP BY hq.time_str, hq.qty, hq.hampers_qty
+            GROUP BY hq.time_str, hq.qty
         `, [date, store_id]);
 
         for (const row of res.rows) {
-            const qty = parseFloat(row.qty);
-            const hampers_qty = parseFloat(row.hampers_qty || '0');
-            const used_qty = parseFloat(row.used_qty);
-            const used_hampers_qty = parseFloat(row.used_hampers_qty);
-
-            const rQty = Math.max(0, qty - used_qty);
-            const rHampersQty = Math.max(0, hampers_qty - used_hampers_qty);
+            const rQty = remainingQuota(parseFloat(row.qty), parseFloat(row.used_qty));
 
             const ex = ttlUntilDate(date);
             await redis.set(`hourly:${store_id}:${date}:${row.time_str}`, rQty, { ex });
-            await redis.set(`hourly:hampers:${store_id}:${date}:${row.time_str}`, rHampersQty, { ex });
         }
     } catch (err) {
         console.error(`Failed to sync hourly Redis quotas for store ${store_id}, date: ${date}`, err);

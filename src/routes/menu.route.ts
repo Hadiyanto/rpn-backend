@@ -1,12 +1,16 @@
 import { Router } from 'express';
+import { sendError } from '../utils/errors';
 import { getMenus, createMenu, updateMenu, deleteMenu } from '../services/menu.service';
 import { redis } from '../config/redis';
 
 const router = Router();
 
+// Bump the version whenever the menu row shape changes so stale cached lists are ignored.
+export const MENU_CACHE_KEY = 'menu_list:v2';
+
 router.get('/menu', async (req, res) => {
     try {
-        const cacheKey = 'menu_list';
+        const cacheKey = MENU_CACHE_KEY;
         let data: any = await redis.get(cacheKey);
 
         if (!data) {
@@ -21,7 +25,7 @@ router.get('/menu', async (req, res) => {
 
         res.json({ status: 'ok', data });
     } catch (e: any) {
-        res.status(500).json({ status: 'error', message: e.message });
+        sendError(res, e);
     }
 });
 
@@ -32,22 +36,22 @@ router.post('/menu', async (req, res) => {
             return res.status(400).json({ status: 'error', message: 'name and price are required' });
         }
         const data = await createMenu(name, price, description, is_active);
-        await redis.del('menu_list');
+        await redis.del(MENU_CACHE_KEY);
         res.json({ status: 'ok', data });
     } catch (e: any) {
-        res.status(500).json({ status: 'error', message: e.message });
+        sendError(res, e);
     }
 });
 
 router.put('/menu/:id', async (req, res) => {
     try {
         const id = parseInt(req.params.id);
-        const { name, price, description, is_active, store_ids } = req.body;
-        const data = await updateMenu(id, { name, price, description, is_active, store_ids });
-        await redis.del('menu_list');
+        const { name, price, description, is_active, store_ids, box_multiplier, max_flavors } = req.body;
+        const data = await updateMenu(id, { name, price, description, is_active, store_ids, box_multiplier, max_flavors });
+        await redis.del(MENU_CACHE_KEY);
         res.json({ status: 'ok', data });
     } catch (e: any) {
-        res.status(500).json({ status: 'error', message: e.message });
+        sendError(res, e);
     }
 });
 
@@ -55,10 +59,10 @@ router.delete('/menu/:id', async (req, res) => {
     try {
         const id = parseInt(req.params.id);
         await deleteMenu(id);
-        await redis.del('menu_list');
+        await redis.del(MENU_CACHE_KEY);
         res.json({ status: 'ok', message: 'Menu deleted' });
     } catch (e: any) {
-        res.status(500).json({ status: 'error', message: e.message });
+        sendError(res, e);
     }
 });
 

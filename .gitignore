@@ -137,3 +137,11 @@ dist
 # Vite logs files
 vite.config.js.timestamp-*
 vite.config.ts.timestamp-*
+
+# Local tooling / OS files
+.DS_Store
+.codegraph/
+.rtk/
+
+# WhatsApp (Baileys) local session files
+whatsapp-session/

@@ -1,4 +1,4 @@
-import { supabase } from '../config/supabase';
+import { pool, insertRow } from '../config/db';
 
 export interface CreatePengeluaranPayload {
     name: string;
@@ -10,28 +10,16 @@ export interface CreatePengeluaranPayload {
 
 export const createPengeluaran = async (payload: CreatePengeluaranPayload) => {
     const { name, category, price, date, receipt_image_url } = payload;
-
-    const insertData: Record<string, unknown> = { name, price };
-    if (category !== undefined) insertData.category = category;
-    if (date) insertData.date = date;
-    if (receipt_image_url !== undefined) insertData.receipt_image_url = receipt_image_url;
-
-    const { data, error } = await supabase
-        .from('pengeluaran')
-        .insert(insertData)
-        .select()
-        .single();
-
-    if (error) throw error;
-    return data;
+    return insertRow('pengeluaran', {
+        name,
+        price,
+        category,
+        date: date || undefined, // empty → DB default (current_date)
+        receipt_image_url,
+    });
 };
 
 export const getPengeluaran = async () => {
-    const { data, error } = await supabase
-        .from('pengeluaran')
-        .select('*')
-        .order('date', { ascending: false });
-
-    if (error) throw error;
-    return data ?? [];
+    const { rows } = await pool.query('SELECT * FROM pengeluaran ORDER BY date DESC');
+    return rows;
 };

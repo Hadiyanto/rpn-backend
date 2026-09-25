@@ -1,4 +1,5 @@
 import { Router } from 'express';
+import { sendError } from '../utils/errors';
 import { saveSubscription, deleteSubscription } from '../services/push.service';
 
 const router = Router();
@@ -14,7 +15,7 @@ router.post('/push/subscribe', async (req, res) => {
         const data = await saveSubscription({ endpoint, keys });
         res.json({ status: 'ok', data });
     } catch (e: any) {
-        res.status(500).json({ status: 'error', message: e.message });
+        sendError(res, e);
     }
 });
 
@@ -29,7 +30,7 @@ router.delete('/push/unsubscribe', async (req, res) => {
         await deleteSubscription(endpoint);
         res.json({ status: 'ok' });
     } catch (e: any) {
-        res.status(500).json({ status: 'error', message: e.message });
+        sendError(res, e);
     }
 });
 

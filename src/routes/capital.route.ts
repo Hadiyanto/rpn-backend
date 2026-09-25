@@ -1,4 +1,5 @@
 import { Router } from 'express';
+import { sendError } from '../utils/errors';
 import { getCapitals, createCapital, updateCapital, deleteCapital } from '../services/capital.service';
 
 const router = Router();
@@ -8,7 +9,7 @@ router.get('/capital', async (req, res) => {
         const data = await getCapitals();
         res.json({ status: 'ok', data });
     } catch (e: any) {
-        res.status(500).json({ status: 'error', message: e.message });
+        sendError(res, e);
     }
 });
 
@@ -22,7 +23,7 @@ router.post('/capital', async (req, res) => {
         const data = await createCapital({ amount, note });
         res.json({ status: 'ok', data });
     } catch (e: any) {
-        res.status(500).json({ status: 'error', message: e.message });
+        sendError(res, e);
     }
 });
 
@@ -37,7 +38,7 @@ router.put('/capital/:id', async (req, res) => {
         const data = await updateCapital(id, { amount, note });
         res.json({ status: 'ok', data });
     } catch (e: any) {
-        res.status(500).json({ status: 'error', message: e.message });
+        sendError(res, e);
     }
 });
 
@@ -51,7 +52,7 @@ router.delete('/capital/:id', async (req, res) => {
         await deleteCapital(id);
         res.json({ status: 'ok', message: 'Deleted successfully' });
     } catch (e: any) {
-        res.status(500).json({ status: 'error', message: e.message });
+        sendError(res, e);
     }
 });
 

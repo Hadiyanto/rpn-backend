@@ -1,4 +1,5 @@
-import { supabase } from '../config/supabase';
+import { pool, insertRow, updateRowById } from '../config/db';
+import { NotFoundError } from '../utils/errors';
 
 export interface CreateDebtPayload {
     source: string;
@@ -15,48 +16,30 @@ export interface UpdateDebtPayload {
 }
 
 export const getDebts = async () => {
-    const { data, error } = await supabase
-        .from('debt')
-        .select('*')
-        .order('created_at', { ascending: false });
-
-    if (error) throw error;
-    return data ?? [];
+    const { rows } = await pool.query('SELECT * FROM debt ORDER BY created_at DESC');
+    return rows;
 };
 
-export const createDebt = async (payload: CreateDebtPayload) => {
-    const { data, error } = await supabase
-        .from('debt')
-        .insert([{
-            ...payload,
-            status: payload.status ?? 'ACTIVE',
-        }])
-        .select()
-        .single();
-
-    if (error) throw error;
-    return data;
-};
+export const createDebt = async (payload: CreateDebtPayload) =>
+    insertRow('debt', {
+        source: payload.source,
+        total_amount: payload.total_amount,
+        remaining_amount: payload.remaining_amount,
+        status: payload.status ?? 'ACTIVE',
+    });
 
 export const updateDebt = async (id: number, payload: UpdateDebtPayload) => {
-    const { data, error } = await supabase
-        .from('debt')
-        .update(payload)
-        .eq('id', id)
-        .select()
-        .single();
-
-    if (error) throw error;
-    if (!data) throw new Error(`Debt dengan id ${id} tidak ditemukan`);
+    const data = await updateRowById('debt', id, {
+        source: payload.source,
+        total_amount: payload.total_amount,
+        remaining_amount: payload.remaining_amount,
+        status: payload.status,
+    });
+    if (!data) throw new NotFoundError(`Debt dengan id ${id} tidak ditemukan`);
     return data;
 };
 
 export const deleteDebt = async (id: number) => {
-    const { error } = await supabase
-        .from('debt')
-        .delete()
-        .eq('id', id);
-
-    if (error) throw error;
+    await pool.query('DELETE FROM debt WHERE id = $1', [id]);
     return true;
 };

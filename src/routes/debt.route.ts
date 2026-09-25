@@ -1,4 +1,5 @@
 import { Router } from 'express';
+import { sendError } from '../utils/errors';
 import { getDebts, createDebt, updateDebt, deleteDebt } from '../services/debt.service';
 
 const router = Router();
@@ -8,7 +9,7 @@ router.get('/debt', async (req, res) => {
         const data = await getDebts();
         res.json({ status: 'ok', data });
     } catch (e: any) {
-        res.status(500).json({ status: 'error', message: e.message });
+        sendError(res, e);
     }
 });
 
@@ -22,7 +23,7 @@ router.post('/debt', async (req, res) => {
         const data = await createDebt({ source, total_amount, remaining_amount, status });
         res.json({ status: 'ok', data });
     } catch (e: any) {
-        res.status(500).json({ status: 'error', message: e.message });
+        sendError(res, e);
     }
 });
 
@@ -37,7 +38,7 @@ router.put('/debt/:id', async (req, res) => {
         const data = await updateDebt(id, { source, total_amount, remaining_amount, status });
         res.json({ status: 'ok', data });
     } catch (e: any) {
-        res.status(500).json({ status: 'error', message: e.message });
+        sendError(res, e);
     }
 });
 
@@ -51,7 +52,7 @@ router.delete('/debt/:id', async (req, res) => {
         await deleteDebt(id);
         res.json({ status: 'ok', message: 'Deleted successfully' });
     } catch (e: any) {
-        res.status(500).json({ status: 'error', message: e.message });
+        sendError(res, e);
     }
 });
 

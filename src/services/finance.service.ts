@@ -1,69 +1,38 @@
-import { supabase } from '../config/supabase';
+import { pool } from '../config/db';
+import { getMenuPriceMap } from './menu.service';
 
 export const getWeeklySummary = async (start: string, end: string) => {
-    // 1. Get DONE orders in range
-    const { data: orders, error: ordersError } = await supabase
-        .from('orders')
-        .select(`
-            id,
-            status,
-            pickup_date,
-            items:order_items (
-                qty,
-                box_type
-            )
-        `)
-        .eq('status', 'DONE')
-        .gte('pickup_date', start)
-        .lte('pickup_date', end);
+    // 1. Items of DONE orders in range, grouped per box type
+    const { rows: itemRows } = await pool.query(`
+        SELECT oi.box_type, SUM(oi.qty)::int AS qty
+        FROM orders o
+        JOIN order_items oi ON oi.order_id = o.id
+        WHERE o.status = 'DONE'
+          AND o.pickup_date >= $1::date
+          AND o.pickup_date <= $2::date
+        GROUP BY oi.box_type
+    `, [start, end]);
 
-    if (ordersError) throw ordersError;
-
-    const PRICE = {
-        FULL: 65000,
-        HALF: 35000,
-    };
+    // Prices come from the menu table (including retired menus such as HAMPERS, so older
+    // orders are still counted) instead of being hardcoded here.
+    const prices = await getMenuPriceMap({ activeOnly: false });
 
     let totalRevenue = 0;
     let totalBoxes = 0;
+    for (const row of itemRows) {
+        totalRevenue += row.qty * (prices.get(row.box_type) ?? 0);
+        totalBoxes += row.qty;
+    }
 
-    (orders ?? []).forEach((order: any) => {
-        (order.items ?? []).forEach((item: any) => {
-            const boxType = item.box_type as 'FULL' | 'HALF';
-            totalRevenue += item.qty * (PRICE[boxType] || 0);
-            totalBoxes += item.qty;
-        });
-    });
-
-    // 2. Get total expenses in range
-    const { data: expenses, error: expensesError } = await supabase
-        .from('pengeluaran')
-        .select('price')
-        .gte('date', start)
-        .lte('date', end);
-
-    if (expensesError) throw expensesError;
-
-    const totalCost = (expenses ?? []).reduce((sum, exp: any) => sum + Number(exp.price), 0);
-
-    // 3. Get personal capital (sum)
-    const { data: capitals, error: capitalError } = await supabase
-        .from('capital')
-        .select('amount');
-
-    if (capitalError) throw capitalError;
-
-    const personalCapital = (capitals ?? []).reduce((sum, cap: any) => sum + Number(cap.amount), 0);
-
-    // 4. Get remaining debt (ACTIVE only)
-    const { data: debts, error: debtError } = await supabase
-        .from('debt')
-        .select('remaining_amount')
-        .eq('status', 'ACTIVE');
-
-    if (debtError) throw debtError;
-
-    const remainingDebt = (debts ?? []).reduce((sum, d: any) => sum + Number(d.remaining_amount), 0);
+    // 2–4. Expenses in range, personal capital, remaining ACTIVE debt
+    const [{ rows: [cost] }, { rows: [capital] }, { rows: [debt] }] = await Promise.all([
+        pool.query('SELECT COALESCE(SUM(price), 0) AS total FROM pengeluaran WHERE date >= $1::date AND date <= $2::date', [start, end]),
+        pool.query('SELECT COALESCE(SUM(amount), 0) AS total FROM capital'),
+        pool.query(`SELECT COALESCE(SUM(remaining_amount), 0) AS total FROM debt WHERE status = 'ACTIVE'`),
+    ]);
+    const totalCost = Number(cost.total);
+    const personalCapital = Number(capital.total);
+    const remainingDebt = Number(debt.total);
 
     // 5. Calculations
     const grossProfit = totalRevenue - totalCost;

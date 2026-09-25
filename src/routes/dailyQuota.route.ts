@@ -1,4 +1,5 @@
 import { Router } from 'express';
+import { sendError } from '../utils/errors';
 import {
     getDailyQuotas,
     getDailyQuotaByDate,
@@ -23,25 +24,23 @@ router.get('/daily-quota', async (req, res) => {
         const data = await getDailyQuotas(store_id);
         res.json({ status: 'ok', data });
     } catch (e: any) {
-        const msg = e?.message || e?.details || JSON.stringify(e) || 'Unknown error';
-        console.error('[daily-quota GET]', e);
-        res.status(500).json({ status: 'error', message: msg });
+        sendError(res, e, 'daily-quota GET');
     }
 });
 
 router.post('/daily-quota', async (req, res) => {
     try {
-        const { date, qty, hampers_qty, store_id } = req.body;
+        const { date, qty, store_id } = req.body;
         if (!date || qty === undefined || !store_id) {
             return res.status(400).json({ status: 'error', message: 'date, qty, and store_id are required' });
         }
-        const data = await createDailyQuota(date, qty, store_id, hampers_qty || 0);
+        const data = await createDailyQuota(date, qty, store_id);
         res.json({ status: 'ok', data });
     } catch (e: any) {
         if (e.code === '23505') { // Unique constraint violation
             res.status(400).json({ status: 'error', message: 'Quota for this date already exists' });
         } else {
-            res.status(500).json({ status: 'error', message: e.message });
+            sendError(res, e);
         }
     }
 });
@@ -49,14 +48,14 @@ router.post('/daily-quota', async (req, res) => {
 router.put('/daily-quota/:id', async (req, res) => {
     try {
         const id = parseInt(req.params.id);
-        const { qty, hampers_qty } = req.body;
+        const { qty } = req.body;
         if (qty === undefined) {
             return res.status(400).json({ status: 'error', message: 'qty is required' });
         }
-        const data = await updateDailyQuota(id, qty, hampers_qty);
+        const data = await updateDailyQuota(id, qty);
         res.json({ status: 'ok', data });
     } catch (e: any) {
-        res.status(500).json({ status: 'error', message: e.message });
+        sendError(res, e);
     }
 });
 
@@ -66,7 +65,7 @@ router.delete('/daily-quota/:id', async (req, res) => {
         await deleteDailyQuota(id);
         res.json({ status: 'ok', message: 'Daily quota deleted' });
     } catch (e: any) {
-        res.status(500).json({ status: 'error', message: e.message });
+        sendError(res, e);
     }
 });
 

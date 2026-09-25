@@ -1,4 +1,5 @@
 import { Router } from 'express';
+import { sendError } from '../utils/errors';
 import { getSalaryConfig, updateSalaryConfig, getDailySalaries, generateDailySalary, calculateSalaryPreview } from '../services/salary.service';
 
 const router = Router();
@@ -8,7 +9,7 @@ router.get('/salary-config', async (_req, res) => {
         const data = await getSalaryConfig();
         res.json({ status: 'ok', data });
     } catch (e: any) {
-        res.status(500).json({ status: 'error', message: e.message });
+        sendError(res, e);
     }
 });
 
@@ -17,7 +18,7 @@ router.put('/salary-config', async (req, res) => {
         const data = await updateSalaryConfig(req.body);
         res.json({ status: 'ok', data });
     } catch (e: any) {
-        res.status(500).json({ status: 'error', message: e.message });
+        sendError(res, e);
     }
 });
 
@@ -26,7 +27,7 @@ router.get('/daily-salary', async (_req, res) => {
         const data = await getDailySalaries();
         res.json({ status: 'ok', data });
     } catch (e: any) {
-        res.status(500).json({ status: 'error', message: e.message });
+        sendError(res, e);
     }
 });
 
@@ -39,7 +40,7 @@ router.post('/daily-salary/preview', async (req, res) => {
         const data = await calculateSalaryPreview(date);
         res.json({ status: 'ok', data });
     } catch (e: any) {
-        res.status(500).json({ status: 'error', message: e.message });
+        sendError(res, e);
     }
 });
 
@@ -52,7 +53,7 @@ router.post('/daily-salary/generate', async (req, res) => {
         const data = await generateDailySalary(date);
         res.json({ status: 'ok', data });
     } catch (e: any) {
-        res.status(500).json({ status: 'error', message: e.message });
+        sendError(res, e);
     }
 });
 

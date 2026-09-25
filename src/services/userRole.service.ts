@@ -1,4 +1,4 @@
-import { supabase } from '../config/supabase';
+import { pool } from '../config/db';
 
 export interface UserRole {
     user_id: string;
@@ -12,15 +12,13 @@ const DEFAULT_ROLE: Omit<UserRole, 'user_id' | 'email'> = {
     allowed_pages: ['orders', 'sales', 'stock'],
 };
 
-export const getUserRole = async (userId: string): Promise<UserRole | null> => {
-    const { data, error } = await supabase
-        .from('user_roles')
-        .select('*')
-        .eq('user_id', userId)
-        .single();
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-    if (error || !data) return null;
-    return data as UserRole;
+export const getUserRole = async (userId: string): Promise<UserRole | null> => {
+    // user_id is a uuid column; a malformed id simply has no role (supabase-js returned an error → null).
+    if (!UUID_RE.test(userId)) return null;
+    const { rows } = await pool.query('SELECT * FROM user_roles WHERE user_id = $1', [userId]);
+    return (rows[0] as UserRole) ?? null;
 };
 
 export const getUserRoleOrDefault = async (userId: string, email?: string): Promise<UserRole> => {

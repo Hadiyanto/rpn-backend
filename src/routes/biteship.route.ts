@@ -1,4 +1,5 @@
 import { Router } from 'express';
+import { sendError } from '../utils/errors';
 import { biteshipGet, biteshipPost } from '../utils/biteship';
 import { getStoreById } from '../services/store.service';
 
@@ -19,7 +20,7 @@ router.get('/biteship/areas', async (req, res) => {
         const data = await biteshipGet(`/maps/areas?countries=ID&input=${encodeURIComponent(String(search))}&type=single`);
         res.json({ status: 'ok', data: data.areas ?? [] });
     } catch (e: any) {
-        res.status(500).json({ status: 'error', message: e.message });
+        sendError(res, e);
     }
 });
 
@@ -65,7 +66,7 @@ router.post('/biteship/rates', async (req, res) => {
         const data = await biteshipPost('/rates/couriers', ratePayload);
         res.json({ status: 'ok', data: data.pricing ?? [] });
     } catch (e: any) {
-        res.status(500).json({ status: 'error', message: e.message });
+        sendError(res, e);
     }
 });
 
@@ -154,7 +155,7 @@ router.post('/biteship/order', async (req, res) => {
         const data = await biteshipPost('/orders', payload);
         res.json({ status: 'ok', data });
     } catch (e: any) {
-        res.status(500).json({ status: 'error', message: e.message });
+        sendError(res, e);
     }
 });
 
@@ -168,7 +169,7 @@ router.get('/biteship/order/:id', async (req, res) => {
         const data = await biteshipGet(`/orders/${id}`);
         res.json({ status: 'ok', data });
     } catch (e: any) {
-        res.status(500).json({ status: 'error', message: e.message });
+        sendError(res, e);
     }
 });
 

@@ -1,4 +1,5 @@
 import { Router } from 'express';
+import { sendError } from '../utils/errors';
 import { getPengeluaran, createPengeluaran } from '../services/pengeluaran.service';
 
 const router = Router();
@@ -8,7 +9,7 @@ router.get('/pengeluaran', async (_req, res) => {
         const data = await getPengeluaran();
         res.json({ status: 'ok', data });
     } catch (e: any) {
-        res.status(500).json({ status: 'error', message: e.message });
+        sendError(res, e);
     }
 });
 
@@ -24,7 +25,7 @@ router.post('/pengeluaran', async (req, res) => {
         const data = await createPengeluaran({ name, category, price: Number(price), date, receipt_image_url });
         res.json({ status: 'ok', data });
     } catch (e: any) {
-        res.status(500).json({ status: 'error', message: e.message });
+        sendError(res, e);
     }
 });
 

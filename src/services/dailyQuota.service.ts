@@ -1,164 +1,125 @@
-import { supabase } from '../config/supabase';
-import { pool } from '../config/db';
+import { pool, insertRow } from '../config/db';
 import { redis, ttlUntilDate } from '../utils/redis';
+import { BOX_UNITS_SQL, remainingQuota } from '../utils/boxUnits';
+import { ValidationError } from '../utils/validation';
+import { NotFoundError } from '../utils/errors';
 
-export const getDailyQuotas = async (store_id: number) => {
-    // DB is needed for the master 'qty' (total provisioned limit) and 'id' mappings
-    const { data: rows, error } = await supabase
-        .from('daily_quota')
-        .select('id, date, qty, hampers_qty, store_id')
-        .eq('store_id', store_id)
-        .order('date', { ascending: false })
-        .limit(30);
+const dailyKey = (store_id: number, date: string) => `quota:${store_id}:${date}`;
 
-    if (error) throw new Error(`Supabase query failed: ${error.message}`);
-    const validRows = rows || [];
+/** Box units already taken by non-cancelled orders, per pickup date. Dates without orders are 0. */
+export const getUsedBoxByDate = async (store_id: number, dates: string[]): Promise<Map<string, number>> => {
+    const used = new Map<string, number>(dates.map(d => [d, 0]));
+    if (dates.length === 0) return used;
 
-    const keys = validRows.flatMap(row => [`quota:${store_id}:${row.date}`, `quota:hampers:${store_id}:${row.date}`]);
-    let redisVals: (string | number | null)[] = [];
-    if (keys.length > 0) {
-        redisVals = await redis.mget(...keys);
+    const res = await pool.query(`
+        SELECT o.pickup_date::text AS date, COALESCE(SUM(${BOX_UNITS_SQL}), 0) AS used_qty
+        FROM orders o
+        JOIN order_items oi ON oi.order_id = o.id
+        WHERE o.store_id = $1
+          AND o.pickup_date = ANY($2::date[])
+          AND o.status != 'CANCELLED'
+        GROUP BY o.pickup_date
+    `, [store_id, dates]);
+
+    for (const row of res.rows) {
+        used.set(row.date, parseFloat(row.used_qty));
     }
+    return used;
+};
 
-    return validRows.map((row, i) => {
-        const qty = parseFloat(row.qty);
-        const hampers_qty = parseFloat(row.hampers_qty || '0');
+/**
+ * Resolves "remaining" for each quota row: Redis is the live source of truth; on a cache
+ * miss the value is rebuilt from DB (qty − used) and written back with NX so a concurrent
+ * createOrder() decrement is never clobbered.
+ */
+const withRemaining = async <T extends { date: string; qty: string | number }>(store_id: number, rows: T[]) => {
+    const keys = rows.map(row => dailyKey(store_id, row.date));
+    const redisVals: (string | number | null)[] = keys.length > 0 ? await redis.mget(...keys) : [];
 
-        let remaining_qty = qty;
-        let remaining_hampers_qty = hampers_qty;
+    const missingDates = rows.filter((_, i) => redisVals[i] === null || redisVals[i] === undefined).map(r => r.date);
+    const usedByDate = await getUsedBoxByDate(store_id, missingDates);
 
-        // Redis is the ultimate source of truth for "Remaining"
-        const rQty = redisVals[i * 2];
-        const rHampersQty = redisVals[i * 2 + 1];
+    return rows.map((row, i) => {
+        const qty = parseFloat(String(row.qty));
+        const key = dailyKey(store_id, row.date);
+        const rQty = redisVals[i];
+        let remaining_qty: number;
 
         if (rQty !== null && rQty !== undefined) {
             remaining_qty = Math.max(0, Number(rQty));
             if (qty < remaining_qty) {
                 remaining_qty = Math.max(0, qty);
-                redis.set(`quota:${store_id}:${row.date}`, remaining_qty, { ex: ttlUntilDate(row.date) }).catch(console.error);
+                redis.set(key, remaining_qty, { ex: ttlUntilDate(row.date) }).catch(console.error);
             }
         } else {
-            // Cache warming if Redis dropped it. NX avoids clobbering a decrement
-            // that a concurrent createOrder() call may have just applied.
-            redis.set(`quota:${store_id}:${row.date}`, remaining_qty, { nx: true, ex: ttlUntilDate(row.date) }).catch(console.error);
+            remaining_qty = remainingQuota(qty, usedByDate.get(row.date) ?? 0);
+            redis.set(key, remaining_qty, { nx: true, ex: ttlUntilDate(row.date) }).catch(console.error);
         }
-
-        if (rHampersQty !== null && rHampersQty !== undefined) {
-            remaining_hampers_qty = Math.max(0, Number(rHampersQty));
-            if (hampers_qty < remaining_hampers_qty) {
-                remaining_hampers_qty = Math.max(0, hampers_qty);
-                redis.set(`quota:hampers:${store_id}:${row.date}`, remaining_hampers_qty, { ex: ttlUntilDate(row.date) }).catch(console.error);
-            }
-        } else {
-            // Cache warming (NX — see above)
-            redis.set(`quota:hampers:${store_id}:${row.date}`, remaining_hampers_qty, { nx: true, ex: ttlUntilDate(row.date) }).catch(console.error);
-        }
-
-        const used_qty = Math.max(0, qty - remaining_qty);
-        const used_hampers_qty = Math.max(0, hampers_qty - remaining_hampers_qty);
 
         return {
             ...row,
             qty,
-            used_qty,
+            used_qty: Math.max(0, qty - remaining_qty),
             remaining_qty,
-            hampers_qty,
-            used_hampers_qty,
-            remaining_hampers_qty
         };
     });
 };
 
-export const getDailyQuotaByDate = async (date: string, store_id: number) => {
-    const { data: rows, error } = await supabase
-        .from('daily_quota')
-        .select('id, date, qty, hampers_qty, store_id')
-        .eq('date', date)
-        .eq('store_id', store_id)
-        .limit(1);
-
-    if (error) throw new Error(`Supabase query failed: ${error.message}`);
-    if (!rows || rows.length === 0) return null;
-
-    const row = rows[0];
-    const qty = parseFloat(row.qty);
-    const hampers_qty = parseFloat(row.hampers_qty || '0');
-
-    let remaining_qty = qty;
-    let remaining_hampers_qty = hampers_qty;
-
-    // Redis overrides DB for live counts
-    const rQty = await redis.get(`quota:${store_id}:${date}`);
-    const rHampersQty = await redis.get(`quota:hampers:${store_id}:${date}`);
-
-    if (rQty !== null && rQty !== undefined) {
-        remaining_qty = Math.max(0, Number(rQty));
-        if (qty < remaining_qty) {
-            remaining_qty = Math.max(0, qty);
-            redis.set(`quota:${store_id}:${date}`, remaining_qty, { ex: ttlUntilDate(date) }).catch(console.error);
-        }
-    } else {
-        redis.set(`quota:${store_id}:${date}`, remaining_qty, { nx: true, ex: ttlUntilDate(date) }).catch(console.error);
-    }
-
-    if (rHampersQty !== null && rHampersQty !== undefined) {
-        remaining_hampers_qty = Math.max(0, Number(rHampersQty));
-        if (hampers_qty < remaining_hampers_qty) {
-            remaining_hampers_qty = Math.max(0, hampers_qty);
-            redis.set(`quota:hampers:${store_id}:${date}`, remaining_hampers_qty, { ex: ttlUntilDate(date) }).catch(console.error);
-        }
-    } else {
-        redis.set(`quota:hampers:${store_id}:${date}`, remaining_hampers_qty, { nx: true, ex: ttlUntilDate(date) }).catch(console.error);
-    }
-
-    const used_qty = Math.max(0, qty - remaining_qty);
-    const used_hampers_qty = Math.max(0, hampers_qty - remaining_hampers_qty);
-
-    return {
-        ...row,
-        qty,
-        used_qty,
-        remaining_qty,
-        hampers_qty,
-        used_hampers_qty,
-        remaining_hampers_qty
-    };
+export const getDailyQuotas = async (store_id: number) => {
+    // DB is needed for the master 'qty' (total provisioned limit) and 'id' mappings
+    const { rows } = await pool.query(
+        'SELECT id, date, qty, store_id FROM daily_quota WHERE store_id = $1 ORDER BY date DESC LIMIT 30',
+        [store_id]
+    );
+    return withRemaining(store_id, rows);
 };
 
-export const createDailyQuota = async (date: string, qty: number, store_id: number, hampers_qty: number = 0) => {
-    const { data, error } = await supabase
-        .from('daily_quota')
-        .insert([{ date, qty, hampers_qty, store_id }])
-        .select()
-        .single();
+export const getDailyQuotaByDate = async (date: string, store_id: number) => {
+    const { rows } = await pool.query(
+        'SELECT id, date, qty, store_id FROM daily_quota WHERE date = $1::date AND store_id = $2 LIMIT 1',
+        [date, store_id]
+    );
+    if (rows.length === 0) return null;
 
-    if (error) throw error;
+    const [row] = await withRemaining(store_id, rows);
+    return row;
+};
 
-    // Sync newly created quota array with Redis
-    // Remaining initially equals the provisioned quantity
-    try {
-        const ex = ttlUntilDate(date);
-        await redis.set(`quota:${store_id}:${date}`, qty, { ex });
-        await redis.set(`quota:hampers:${store_id}:${date}`, hampers_qty, { ex });
-    } catch (err) {
-        console.error(`Failed to sync newly created quota to Redis for store ${store_id}, date: ${date}`, err);
+/**
+ * Makes sure the Redis counter for a date exists before createOrder() decrements it.
+ * Without this, INCRBYFLOAT on a missing key starts from 0, rejects the order as "full",
+ * and leaves a TTL-less "0" key behind that NX warming can never repair.
+ */
+export const ensureDailyQuotaKey = async (store_id: number, date: string) => {
+    const key = dailyKey(store_id, date);
+    if (await redis.exists(key)) return;
+
+    const dqRes = await pool.query('SELECT qty FROM daily_quota WHERE store_id = $1 AND date = $2::date', [store_id, date]);
+    if (dqRes.rowCount === 0) {
+        throw new ValidationError(`MOHON MAAF: Tanggal ${date} belum dibuka untuk pemesanan.`);
     }
+
+    const used = (await getUsedBoxByDate(store_id, [date])).get(date) ?? 0;
+    await redis.set(key, remainingQuota(parseFloat(dqRes.rows[0].qty), used), { nx: true, ex: ttlUntilDate(date) });
+};
+
+export const createDailyQuota = async (date: string, qty: number, store_id: number) => {
+    // A duplicate (store_id, date) raises pg error 23505, which the route turns into a 400.
+    const data = await insertRow('daily_quota', { date, qty, store_id });
+
+    // Orders may already exist for this date (e.g. the quota row was deleted and re-created),
+    // so compute remaining from DB instead of assuming the full qty is free.
+    await syncDailyRedisQuota(store_id, date);
 
     return data;
 };
 
-export const updateDailyQuota = async (id: number, qty: number, hampers_qty?: number) => {
-    const updateData: any = { qty, updated_at: new Date().toISOString() };
-    if (hampers_qty !== undefined) updateData.hampers_qty = hampers_qty;
-
-    const { data, error } = await supabase
-        .from('daily_quota')
-        .update(updateData)
-        .eq('id', id)
-        .select()
-        .single();
-
-    if (error) throw error;
+export const updateDailyQuota = async (id: number, qty: number) => {
+    const { rows: [data] } = await pool.query(
+        'UPDATE daily_quota SET qty = $2, updated_at = CURRENT_TIMESTAMP WHERE id = $1 RETURNING *',
+        [id, qty]
+    );
+    if (!data) throw new NotFoundError(`Kuota dengan id ${id} tidak ditemukan`);
 
     // Sync the updated quota to Redis
     // Calculate the real remaining qty by querying PostgreSQL exactly how many were already sold.
@@ -171,23 +132,11 @@ export const updateDailyQuota = async (id: number, qty: number, hampers_qty?: nu
 
 export const deleteDailyQuota = async (id: number) => {
     // Determine the date/store to delete the keys from Redis
-    const { data: qData } = await supabase
-        .from('daily_quota')
-        .select('date, store_id')
-        .eq('id', id)
-        .single();
-
-    const { error } = await supabase
-        .from('daily_quota')
-        .delete()
-        .eq('id', id);
-
-    if (error) throw error;
+    const { rows: [qData] } = await pool.query('DELETE FROM daily_quota WHERE id = $1 RETURNING date, store_id', [id]);
 
     if (qData && qData.date) {
         try {
-            await redis.del(`quota:${qData.store_id}:${qData.date}`);
-            await redis.del(`quota:hampers:${qData.store_id}:${qData.date}`);
+            await redis.del(dailyKey(qData.store_id, qData.date));
         } catch (err) {
             console.error(`Failed to delete Redis quota keys for store ${qData.store_id}, date: ${qData.date}`, err);
         }
@@ -198,30 +147,13 @@ export const deleteDailyQuota = async (id: number) => {
 
 export const syncDailyRedisQuota = async (store_id: number, date: string) => {
     try {
-        const dqRes = await pool.query('SELECT qty, hampers_qty FROM daily_quota WHERE store_id = $1 AND date = $2::date', [store_id, date]);
+        const dqRes = await pool.query('SELECT qty FROM daily_quota WHERE store_id = $1 AND date = $2::date', [store_id, date]);
         if (dqRes.rowCount === 0) return;
-        const { qty, hampers_qty } = dqRes.rows[0];
 
-        const usedRes = await pool.query(`
-            SELECT
-                COALESCE(SUM(CASE WHEN oi.box_type IN ('FULL', 'HALF') THEN oi.qty ELSE 0 END), 0) as used_qty,
-                COALESCE(SUM(CASE WHEN oi.box_type = 'HAMPERS' THEN oi.qty ELSE 0 END), 0) as used_hampers_qty
-            FROM orders o
-            JOIN order_items oi ON o.id = oi.order_id
-            WHERE to_char(o.pickup_date, 'YYYY-MM-DD') = $1
-              AND o.store_id = $2
-              AND o.status != 'CANCELLED'
-        `, [date, store_id]);
+        const used = (await getUsedBoxByDate(store_id, [date])).get(date) ?? 0;
+        const newRemaining = remainingQuota(parseFloat(dqRes.rows[0].qty), used);
 
-        const soldQty = parseInt(usedRes.rows[0].used_qty, 10);
-        const soldHampersQty = parseInt(usedRes.rows[0].used_hampers_qty, 10);
-
-        const newRemaining = Math.max(0, qty - soldQty);
-        const newRemainingHampers = Math.max(0, (hampers_qty || 0) - soldHampersQty);
-
-        const ex = ttlUntilDate(date);
-        await redis.set(`quota:${store_id}:${date}`, newRemaining, { ex });
-        await redis.set(`quota:hampers:${store_id}:${date}`, newRemainingHampers, { ex });
+        await redis.set(dailyKey(store_id, date), newRemaining, { ex: ttlUntilDate(date) });
     } catch (err) {
         console.error(`Failed to sync updated daily quota to Redis for store ${store_id}, date: ${date}`, err);
     }

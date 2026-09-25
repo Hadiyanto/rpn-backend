@@ -1,4 +1,5 @@
-import { supabase } from '../config/supabase';
+import { pool, transaction, insertRow } from '../config/db';
+import { BOX_UNITS_SQL } from '../utils/boxUnits';
 
 export interface SalaryConfigDTO {
     min_box: number;
@@ -8,72 +9,43 @@ export interface SalaryConfigDTO {
 }
 
 export const getSalaryConfig = async () => {
-    const { data, error } = await supabase
-        .from('salary_config')
-        .select('*')
-        .order('min_box', { ascending: true });
-
-    if (error) throw error;
-    return data ?? [];
+    const { rows } = await pool.query('SELECT * FROM salary_config ORDER BY min_box ASC');
+    return rows;
 };
 
 export const updateSalaryConfig = async (configs: SalaryConfigDTO[]) => {
-    // Replace all existing configs
-    const { error: deleteErr } = await supabase
-        .from('salary_config')
-        .delete()
-        .neq('id', 0); // Delete all rows
-
-    if (deleteErr) throw deleteErr;
-
-    const { data, error } = await supabase
-        .from('salary_config')
-        .insert(configs)
-        .select();
-
-    if (error) throw error;
-    return data ?? [];
+    // Replace all existing configs — in one transaction, so a failed insert can't leave the
+    // table empty (the supabase-js version deleted first and inserted separately).
+    return transaction(async (client) => {
+        await client.query('DELETE FROM salary_config');
+        const saved = [];
+        for (const c of configs) {
+            saved.push(await insertRow('salary_config', {
+                min_box: c.min_box,
+                max_box: c.max_box,
+                amount: c.amount,
+                is_fixed: c.is_fixed,
+            }, client));
+        }
+        return saved;
+    });
 };
 
 export const getDailySalaries = async () => {
-    const { data, error } = await supabase
-        .from('daily_salary')
-        .select('*')
-        .order('date', { ascending: false });
-
-    if (error) throw error;
-    return data ?? [];
+    const { rows } = await pool.query('SELECT * FROM daily_salary ORDER BY date DESC');
+    return rows;
 };
 
 export const calculateSalaryPreview = async (date: string) => {
-    // 1. Calculate total boxes sold on that date with status PAID or DONE
-    const { data: orders, error: orderErr } = await supabase
-        .from('orders')
-        .select(`
-            id,
-            status,
-            order_items (
-                box_type,
-                qty
-            )
-        `)
-        .eq('pickup_date', date)
-        .in('status', ['PAID', 'DONE']);
-
-    if (orderErr) throw orderErr;
-
-    let totalBoxes = 0;
-    if (orders) {
-        for (const order of orders) {
-            if (order.order_items) {
-                const items = Array.isArray(order.order_items) ? order.order_items : [order.order_items];
-                for (const item of items) {
-                    if (item.box_type === 'FULL') totalBoxes += item.qty;
-                    if (item.box_type === 'HALF') totalBoxes += (item.qty * 0.5);
-                }
-            }
-        }
-    }
+    // 1. Total boxes sold on that date with status PAID or DONE (FULL = 1, HALF = 0.5)
+    const { rows: [sum] } = await pool.query(`
+        SELECT COALESCE(SUM(${BOX_UNITS_SQL}), 0) AS total_boxes
+        FROM orders o
+        JOIN order_items oi ON oi.order_id = o.id
+        WHERE o.pickup_date = $1::date
+          AND o.status IN ('PAID', 'DONE')
+    `, [date]);
+    const totalBoxes = Number(sum.total_boxes);
 
     // PEMBULATAN KEATAS untuk pencarian range dan kalkulasi nominal
     const boxCountInt = Math.ceil(totalBoxes);
@@ -110,18 +82,13 @@ export const generateDailySalary = async (date: string) => {
     const preview = await calculateSalaryPreview(date);
 
     // 3. Upsert into daily_salary
-    const { data: savedSalary, error: saveErr } = await supabase
-        .from('daily_salary')
-        .upsert({
-            date: date,
-            total_boxes: preview.totalBoxesRounded, // Simpan hasil pembulatan ke database
-            total_salary: preview.totalSalary,
-            updated_at: new Date().toISOString()
-        }, { onConflict: 'date' })
-        .select()
-        .single();
+    const { rows } = await pool.query(`
+        INSERT INTO daily_salary (date, total_boxes, total_salary, updated_at)
+        VALUES ($1, $2, $3, CURRENT_TIMESTAMP)
+        ON CONFLICT (date) DO UPDATE
+        SET total_boxes = EXCLUDED.total_boxes, total_salary = EXCLUDED.total_salary, updated_at = CURRENT_TIMESTAMP
+        RETURNING *
+    `, [date, preview.totalBoxesRounded /* Simpan hasil pembulatan ke database */, preview.totalSalary]);
 
-    if (saveErr) throw saveErr;
-
-    return savedSalary;
+    return rows[0];
 };

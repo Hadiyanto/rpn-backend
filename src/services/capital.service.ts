@@ -1,4 +1,5 @@
-import { supabase } from '../config/supabase';
+import { pool, insertRow, updateRowById } from '../config/db';
+import { NotFoundError } from '../utils/errors';
 
 export interface CreateCapitalPayload {
     amount: number;
@@ -11,45 +12,20 @@ export interface UpdateCapitalPayload {
 }
 
 export const getCapitals = async () => {
-    const { data, error } = await supabase
-        .from('capital')
-        .select('*')
-        .order('created_at', { ascending: false });
-
-    if (error) throw error;
-    return data ?? [];
+    const { rows } = await pool.query('SELECT * FROM capital ORDER BY created_at DESC');
+    return rows;
 };
 
-export const createCapital = async (payload: CreateCapitalPayload) => {
-    const { data, error } = await supabase
-        .from('capital')
-        .insert([payload])
-        .select()
-        .single();
-
-    if (error) throw error;
-    return data;
-};
+export const createCapital = async (payload: CreateCapitalPayload) =>
+    insertRow('capital', { amount: payload.amount, note: payload.note });
 
 export const updateCapital = async (id: number, payload: UpdateCapitalPayload) => {
-    const { data, error } = await supabase
-        .from('capital')
-        .update(payload)
-        .eq('id', id)
-        .select()
-        .single();
-
-    if (error) throw error;
-    if (!data) throw new Error(`Capital dengan id ${id} tidak ditemukan`);
+    const data = await updateRowById('capital', id, { amount: payload.amount, note: payload.note });
+    if (!data) throw new NotFoundError(`Capital dengan id ${id} tidak ditemukan`);
     return data;
 };
 
 export const deleteCapital = async (id: number) => {
-    const { error } = await supabase
-        .from('capital')
-        .delete()
-        .eq('id', id);
-
-    if (error) throw error;
+    await pool.query('DELETE FROM capital WHERE id = $1', [id]);
     return true;
 };

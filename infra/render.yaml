@@ -6,8 +6,37 @@ services:
     region: singapore
     buildCommand: npm install && npm run build
     startCommand: npm start
+    # Migrations are NOT run automatically: run `npm run migrate up` yourself (see README).
     envVars:
+      - key: DATABASE_URL
+        sync: false
+      - key: PG_POOL_MAX
+        value: "10"
       - key: SUPABASE_URL
         sync: false
       - key: SUPABASE_KEY
+        sync: false
+      - key: UPSTASH_REDIS_REST_URL
+        sync: false
+      - key: UPSTASH_REDIS_REST_TOKEN
+        sync: false
+      - key: VAPID_PUBLIC_KEY
+        sync: false
+      - key: VAPID_PRIVATE_KEY
+        sync: false
+      - key: VAPID_EMAIL
+        sync: false
+      - key: CLOUDINARY_CLOUD_NAME
+        sync: false
+      - key: CLOUDINARY_API_KEY
+        sync: false
+      - key: CLOUDINARY_API_SECRET
+        sync: false
+      - key: BITESHIP_KEY
+        sync: false
+      - key: BITESHIP_BASE_URL
+        sync: false
+      - key: CORS_ORIGINS
+        sync: false
+      - key: FRONTEND_URL
         sync: false

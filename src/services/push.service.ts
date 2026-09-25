@@ -1,5 +1,5 @@
 import webpush from 'web-push';
-import { supabase } from '../config/supabase';
+import { pool } from '../config/db';
 
 webpush.setVapidDetails(
     process.env.VAPID_EMAIL!,
@@ -19,31 +19,27 @@ export const saveSubscription = async (sub: PushSubscriptionPayload) => {
     const { endpoint, keys: { p256dh, auth } } = sub;
 
     // Upsert: update jika endpoint sudah ada
-    const { data, error } = await supabase
-        .from('push_subscriptions')
-        .upsert({ endpoint, p256dh, auth }, { onConflict: 'endpoint' })
-        .select()
-        .single();
-
-    if (error) throw error;
-    return data;
+    const { rows } = await pool.query(`
+        INSERT INTO push_subscriptions (endpoint, p256dh, auth)
+        VALUES ($1, $2, $3)
+        ON CONFLICT (endpoint) DO UPDATE SET p256dh = EXCLUDED.p256dh, auth = EXCLUDED.auth
+        RETURNING *
+    `, [endpoint, p256dh, auth]);
+    return rows[0];
 };
 
 export const deleteSubscription = async (endpoint: string) => {
-    const { error } = await supabase
-        .from('push_subscriptions')
-        .delete()
-        .eq('endpoint', endpoint);
-
-    if (error) throw error;
+    await pool.query('DELETE FROM push_subscriptions WHERE endpoint = $1', [endpoint]);
 };
 
 export const sendPushToAll = async (payload: { title: string; body: string; url?: string }) => {
-    const { data: subs, error } = await supabase
-        .from('push_subscriptions')
-        .select('*');
-
-    if (error || !subs) return;
+    let subs: { endpoint: string; p256dh: string; auth: string }[];
+    try {
+        subs = (await pool.query('SELECT * FROM push_subscriptions')).rows;
+    } catch (err) {
+        console.error('[push] could not load subscriptions', err);
+        return;
+    }
 
     const message = JSON.stringify(payload);
     const results = await Promise.allSettled(
@@ -53,7 +49,7 @@ export const sendPushToAll = async (payload: { title: string; body: string; url?
                 message,
             ).catch(async (err) => {
                 if (err.statusCode === 410) {
-                    await supabase.from('push_subscriptions').delete().eq('endpoint', sub.endpoint);
+                    await pool.query('DELETE FROM push_subscriptions WHERE endpoint = $1', [sub.endpoint]);
                 }
             })
         )

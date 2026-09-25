@@ -1,4 +1,5 @@
 import { Router } from 'express';
+import { sendError } from '../utils/errors';
 import { getTransactions, createTransaction } from '../services/transaction.service';
 
 const router = Router();
@@ -8,7 +9,7 @@ router.get('/transactions', async (_req, res) => {
         const data = await getTransactions();
         res.json({ status: 'ok', data });
     } catch (e: any) {
-        res.status(500).json({ status: 'error', message: e.message });
+        sendError(res, e);
     }
 });
 
@@ -18,7 +19,7 @@ router.post('/transaction', async (req, res) => {
         const data = await createTransaction(items, total_price_checkout, customer_name);
         res.json({ status: 'ok', data });
     } catch (e: any) {
-        res.status(500).json({ status: 'error', message: e.message });
+        sendError(res, e);
     }
 });
 

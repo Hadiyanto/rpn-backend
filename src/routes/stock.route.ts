@@ -1,14 +1,26 @@
 import { Router } from 'express';
-import { getStocks, adjustStock, getStockHistory } from '../services/stock.service';
+import { sendError } from '../utils/errors';
+import { getStocks, createStock, adjustStock, getStockHistory } from '../services/stock.service';
 
 const router = Router();
 
-router.get('/stocks', async (_req, res) => {
+router.get('/stocks', async (req, res) => {
     try {
-        const data = await getStocks();
+        const store_id = req.query.store_id ? Number(req.query.store_id) : undefined;
+        const data = await getStocks(store_id);
         res.json({ status: 'ok', data });
     } catch (e: any) {
-        res.status(500).json({ status: 'error', message: e.message });
+        sendError(res, e);
+    }
+});
+
+router.post('/stocks', async (req, res) => {
+    try {
+        const { item_name, unit, store_id, qty } = req.body;
+        const data = await createStock({ item_name, unit, store_id, qty });
+        res.json({ status: 'ok', data });
+    } catch (e: any) {
+        sendError(res, e);
     }
 });
 
@@ -17,7 +29,7 @@ router.post('/stocks/adjust', async (req, res) => {
         const data = await adjustStock(req.body);
         res.json({ status: 'ok', data });
     } catch (e: any) {
-        res.status(500).json({ status: 'error', message: e.message });
+        sendError(res, e);
     }
 });
 
@@ -27,7 +39,7 @@ router.get('/stocks/:id/history', async (req, res) => {
         const data = await getStockHistory(stockId);
         res.json({ status: 'ok', data });
     } catch (e: any) {
-        res.status(500).json({ status: 'error', message: e.message });
+        sendError(res, e);
     }
 });
 

@@ -1,4 +1,5 @@
 import { Router } from 'express';
+import { sendError } from '../utils/errors';
 import { getPenjualanByTransaction } from '../services/penjualan.service';
 
 const router = Router();
@@ -9,7 +10,7 @@ router.get('/penjualan/:transactionId', async (req, res) => {
         const data = await getPenjualanByTransaction(id);
         res.json({ status: 'ok', data });
     } catch (e: any) {
-        res.status(500).json({ status: 'error', message: e.message });
+        sendError(res, e);
     }
 });
 

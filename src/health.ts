@@ -1,19 +1,11 @@
 import { Router } from 'express';
-import { supabase } from './config/supabase';
+import { pool } from './config/db';
 
 const healthRouter = Router();
 
 healthRouter.get('/health', async (req, res) => {
     try {
-        const { data, error } = await supabase
-            .from('health')
-            .select('status')
-            .eq('id', 1)
-            .single();
-
-        if (error) {
-            throw error;
-        }
+        const { rows: [data] } = await pool.query('SELECT status FROM health WHERE id = 1');
 
         res.json({
             response_code: 200,
@@ -21,10 +13,11 @@ healthRouter.get('/health', async (req, res) => {
             time: new Date().toISOString()
         });
     } catch (err: any) {
+        console.error('[health]', err);
         res.status(500).json({
             response_code: 500,
             status: 'error',
-            message: err.message,
+            message: 'database unavailable',
             time: new Date().toISOString()
         });
     }

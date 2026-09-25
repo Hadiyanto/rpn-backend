@@ -1,3 +1,5 @@
+import { UpstreamError } from './errors';
+
 const BASE_URL = process.env.BITESHIP_BASE_URL || 'https://api-sandbox.biteship.com/v1';
 const API_KEY = process.env.BITESHIP_KEY || '';
 
@@ -15,7 +17,7 @@ export async function biteshipGet<T = any>(path: string): Promise<T> {
     });
     const data = await res.json();
     if (!res.ok) {
-        throw new Error(data.error || data.message || `Biteship GET ${path} failed: ${res.status}`);
+        throw new UpstreamError(data.error || data.message || `Biteship GET ${path} failed: ${res.status}`);
     }
     return data as T;
 }
@@ -28,7 +30,7 @@ export async function biteshipPost<T = any>(path: string, body: unknown): Promis
     });
     const data = await res.json();
     if (!res.ok) {
-        throw new Error(data.error || data.message || `Biteship POST ${path} failed: ${res.status}`);
+        throw new UpstreamError(data.error || data.message || `Biteship POST ${path} failed: ${res.status}`);
     }
     return data as T;
 }
