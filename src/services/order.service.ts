@@ -52,13 +52,27 @@ export interface GetOrdersFilter {
     store_id?: number;
 }
 
-/** Checks every item's variant_ids against the live catalog (active, max_flavors, preset rules). */
+/** Checks every item's variant_ids against the live catalog (active, different flavors, max_flavors). */
 const assertVariantSelections = async (items: ValidOrderItem[]) => {
     if (!items.some(item => item.variant_ids)) return;
     const catalog = await loadVariantCatalog();
     items.forEach((item, idx) => {
         if (item.variant_ids) checkVariantSelection(item.variant_ids, item.box_type, catalog, `Item ${idx + 1}`);
     });
+};
+
+/** Every item's box must be an active menu row sold at this store (e.g. a deleted Box Kecil can't be ordered). */
+const assertBoxesAvailable = async (storeId: number, items: ValidOrderItem[]) => {
+    const { rows } = await pool.query(
+        'SELECT name FROM menu WHERE is_active IS NOT FALSE AND $1 = ANY(store_ids)',
+        [storeId]
+    );
+    const sold = new Set(rows.map(r => r.name));
+    for (const item of items) {
+        if (!sold.has(item.box_type)) {
+            throw new ValidationError(`${item.box_type === 'HALF' ? 'Box Kecil' : 'Box Besar'} tidak tersedia di store ini`);
+        }
+    }
 };
 
 /** Inserts order_items (+ their order_item_variants) for an order inside an open transaction. */
@@ -109,6 +123,7 @@ export const createOrder = async (payload: CreateOrderPayload) => {
     const pickup_date = validatePickupDate(payload.pickup_date);
     const pickup_time = validatePickupTime(payload.pickup_time);
     const note = validateNote(payload.note);
+    await assertBoxesAvailable(store_id, pesanan);
     await assertVariantSelections(pesanan);
 
     const requestedBoxQty = boxUnits(pesanan);
@@ -363,7 +378,10 @@ export const updateOrder = async (id: number, payload: UpdateOrderPayload) => {
         ? payload.pickup_time
         : (validatePickupTime(payload.pickup_time) ?? null);
     const note = validateNote(payload.note);
-    if (pesanan) await assertVariantSelections(pesanan);
+    if (pesanan) {
+        await assertBoxesAvailable(oldOrder.store_id, pesanan);
+        await assertVariantSelections(pesanan);
+    }
 
     // 1+2. Header update and item replacement in ONE transaction, so a failed item insert
     // can never leave the header changed with the old items (or no items at all).

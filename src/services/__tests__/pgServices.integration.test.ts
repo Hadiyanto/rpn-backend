@@ -104,13 +104,13 @@ describe.skipIf(!hasTestDb)('services on pg (shape parity & behaviour)', () => {
 
     it('menu / variant / store: list, partial update, 404', async () => {
         const menu = await import('../menu.service');
-        const m = await menu.createMenu('FULL', 65000, 'Box besar');
+        const m = await menu.createMenu({ name: 'FULL', price: 65000, description: 'Box besar' });
         expect(m.price).toBe(65000);
         expect((await menu.updateMenu(m.id, { price: 70000 })).description).toBe('Box besar');
         await expect(menu.updateMenu(999, { price: 1 })).rejects.toMatchObject({ status: 404 });
 
         const variant = await import('../variant.service');
-        const v = await variant.createVariant('Keju');
+        const v = await variant.createVariant({ variant_name: 'Keju' });
         expect((await variant.updateVariant(v.id, { store_ids: [1] })).store_ids).toEqual([1]);
 
         const store = await import('../store.service');

@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import { sendError } from '../utils/errors';
+import { buildShippingItems } from '../services/menu.service';
 import { biteshipGet, biteshipPost } from '../utils/biteship';
 import { getStoreById } from '../services/store.service';
 
@@ -24,11 +25,14 @@ router.get('/biteship/areas', async (req, res) => {
     }
 });
 
+// Couriers asked for rates when the client doesn't specify any (instant + same-day coverage).
+const DEFAULT_RATE_COURIERS = 'gosend,grab,gojek,lalamove,paxel,borzo,sicepat,anteraja,jne,jnt';
+
 /**
  * POST /api/biteship/rates
- * Get shipping rates. Origin always from RPN_ORIGIN (lat/lng).
- * FE cukup kirim: { destination_latitude, destination_longitude, couriers?, items }
- * items: [{ name, value, length, width, height, weight, quantity }]
+ * Origin = the store (store_id). Send either
+ *   boxes: [{ box_type: 'FULL' | 'HALF', qty }]   ← preferred: value/size/weight come from the menu table
+ * or the raw Biteship items: [{ name, value, length, width, height, weight, quantity }].
  */
 router.post('/biteship/rates', async (req, res) => {
     try {
@@ -36,9 +40,12 @@ router.post('/biteship/rates', async (req, res) => {
             store_id,
             destination_latitude,
             destination_longitude,
-            couriers = 'gosend,grab,gojek,jne,sicepat,jnt,anteraja,ide',
-            items,
+            couriers = DEFAULT_RATE_COURIERS,
+            boxes,
         } = req.body;
+        let { items } = req.body;
+
+        if (Array.isArray(boxes) && boxes.length > 0) items = await buildShippingItems(boxes);
 
         if (!store_id) {
             res.status(400).json({ status: 'error', message: 'store_id wajib diisi' });
@@ -49,7 +56,7 @@ router.post('/biteship/rates', async (req, res) => {
             return;
         }
         if (!items?.length) {
-            res.status(400).json({ status: 'error', message: 'Field items wajib diisi' });
+            res.status(400).json({ status: 'error', message: 'Field boxes (atau items) wajib diisi' });
             return;
         }
 
@@ -104,8 +111,10 @@ router.post('/biteship/order', async (req, res) => {
             delivery_date,
             delivery_time,
             order_note,
-            items,
+            boxes,
         } = req.body;
+        // Either boxes: [{ box_type, qty }] (sizes/prices from the menu) or raw Biteship items.
+        const items = Array.isArray(boxes) && boxes.length > 0 ? await buildShippingItems(boxes) : req.body.items;
 
         const required = [
             'store_id', 'destination_contact_name', 'destination_contact_phone',

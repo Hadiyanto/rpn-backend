@@ -26,10 +26,9 @@ describe.skipIf(!hasTestDb)('orders with variant_ids (local Postgres + fake Redi
 
     beforeEach(async () => {
         fakeRedis.store.clear();
-        await db.pool.query('TRUNCATE orders, order_items, order_item_variants, variant_components, daily_quota, hourly_quota, variant, menu RESTART IDENTITY CASCADE');
+        await db.pool.query('TRUNCATE orders, order_items, order_item_variants, daily_quota, hourly_quota, variant, menu RESTART IDENTITY CASCADE');
         await db.pool.query(`INSERT INTO menu (name, price, box_multiplier, max_flavors) VALUES ('FULL', 65000, 1, 3), ('HALF', 35000, 0.5, 1)`);
-        await db.pool.query(`INSERT INTO variant (variant_name) VALUES ('Dark Choco'), ('Vanilla'), ('Keju'), ('Mix 3')`);
-        await db.pool.query(`INSERT INTO variant_components (variant_id, component_variant_id) VALUES (4, 1), (4, 2), (4, 3)`);
+        await db.pool.query(`INSERT INTO variant (variant_name) VALUES ('Dark Choco'), ('Vanilla'), ('Keju')`);
         await db.pool.query(`INSERT INTO daily_quota (date, qty, store_id) VALUES ($1, 10, 1)`, [DATE]);
     });
 
@@ -47,11 +46,11 @@ describe.skipIf(!hasTestDb)('orders with variant_ids (local Postgres + fake Redi
             pesanan: [
                 { box_type: 'FULL', name: 'Mix Dark Choco Dan Vanilla', qty: 2, variant_ids: [1, 2] },
                 { box_type: 'HALF', name: 'Keju', qty: 1, variant_ids: [3] },
-                { box_type: 'FULL', name: 'Mix 3', qty: 1, variant_ids: [4] },
+                { box_type: 'FULL', name: 'Mix Dark Choco Dan Keju Dan Vanilla', qty: 1, variant_ids: [1, 2, 3] },
             ],
         });
         const fetched = await orders.getOrderById(created.id);
-        expect(fetched.items.map((i: any) => i.variant_ids)).toEqual([[1, 2], [3], [4]]);
+        expect(fetched.items.map((i: any) => i.variant_ids)).toEqual([[1, 2], [3], [1, 2, 3]]);
         expect(typeof fetched.pickup_date).toBe('string');
     });
 
@@ -71,8 +70,8 @@ describe.skipIf(!hasTestDb)('orders with variant_ids (local Postgres + fake Redi
     it('rejects invalid selections before touching quota', async () => {
         await expect(orders.createOrder({ ...base, pesanan: [{ box_type: 'HALF', name: 'x', qty: 1, variant_ids: [1, 2] }] }))
             .rejects.toThrow(/maksimal 1 rasa/);
-        await expect(orders.createOrder({ ...base, pesanan: [{ box_type: 'FULL', name: 'x', qty: 1, variant_ids: [4, 1] }] }))
-            .rejects.toThrow(/paket mix/);
+        await expect(orders.createOrder({ ...base, pesanan: [{ box_type: 'FULL', name: 'x', qty: 1, variant_ids: [1, 1] }] }))
+            .rejects.toThrow(/dua kali/);
         await expect(orders.createOrder({ ...base, pesanan: [{ box_type: 'FULL', name: 'x', qty: -5 }] }))
             .rejects.toThrow(/qty/);
         expect(fakeRedis.store.size).toBe(0);
@@ -105,6 +104,16 @@ describe.skipIf(!hasTestDb)('orders with variant_ids (local Postgres + fake Redi
         await expect(orders.createOrder({ ...base, pesanan: [{ box_type: 'FULL', name: 'Keju', qty: 11 }] }))
             .rejects.toMatchObject({ status: 409 });
         await expect(orders.getOrderById(999999)).rejects.toMatchObject({ status: 404 });
+    });
+
+    it('rejects a box that is inactive or not sold at the store', async () => {
+        await db.pool.query(`UPDATE menu SET store_ids = '{2}' WHERE name = 'HALF'`);
+        await expect(orders.createOrder({ ...base, pesanan: [{ box_type: 'HALF', name: 'Keju', qty: 1, variant_ids: [3] }] }))
+            .rejects.toThrow(/Box Kecil tidak tersedia/);
+        await db.pool.query(`UPDATE menu SET store_ids = '{1,2}', is_active = false WHERE name = 'FULL'`);
+        await expect(orders.createOrder({ ...base, pesanan: [{ box_type: 'FULL', name: 'Keju', qty: 1, variant_ids: [3] }] }))
+            .rejects.toThrow(/Box Besar tidak tersedia/);
+        expect(fakeRedis.store.size).toBe(0);
     });
 
     it('legacy items without variant_ids still work', async () => {

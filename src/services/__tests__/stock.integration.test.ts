@@ -21,9 +21,9 @@ describe.skipIf(!hasTestDb)('stock & recipe services (local Postgres)', () => {
     });
 
     beforeEach(async () => {
-        await db.pool.query('TRUNCATE variant_recipe, variant_components, stock_history, stock, variant, menu RESTART IDENTITY CASCADE');
+        await db.pool.query('TRUNCATE variant_recipe, stock_history, stock, variant, menu RESTART IDENTITY CASCADE');
         await db.pool.query(`INSERT INTO menu (name, price, box_multiplier, max_flavors) VALUES ('FULL', 65000, 1, 3), ('HALF', 35000, 0.5, 1)`);
-        await db.pool.query(`INSERT INTO variant (variant_name) VALUES ('Dark Choco'), ('Vanilla'), ('Keju'), ('Mix 3 (Choco, Vanilla, Keju)')`);
+        await db.pool.query(`INSERT INTO variant (variant_name) VALUES ('Dark Choco'), ('Vanilla'), ('Keju')`);
     });
 
     it('createStock + adjustStock (delta and physical count) keep history consistent', async () => {
@@ -60,14 +60,13 @@ describe.skipIf(!hasTestDb)('stock & recipe services (local Postgres)', () => {
         await expect(recipe.replaceVariantRecipe(1, 1, [{ stock_id: otherStore.id, qty_gram: 0 }])).rejects.toThrow(/gram/);
     });
 
-    it('resolveBoxCost end-to-end: flavors, HALF, preset mix', async () => {
+    it('resolveBoxCost end-to-end: flavors, HALF, 3-flavor mix', async () => {
         const tepung = await stock.createStock({ item_name: 'Tepung', unit: 'gram', store_id: 1 });
         const coklat = await stock.createStock({ item_name: 'Cokelat', unit: 'g', store_id: 1 });
 
         await recipe.replaceVariantRecipe(1, 1, [{ stock_id: tepung.id, qty_gram: 50 }, { stock_id: coklat.id, qty_gram: 30 }]);
         await recipe.replaceVariantRecipe(2, 1, [{ stock_id: tepung.id, qty_gram: 50 }]);
         await recipe.replaceVariantRecipe(3, 1, [{ stock_id: tepung.id, qty_gram: 40 }]);
-        await recipe.replaceVariantComponents(4, [1, 2, 3]);
 
         expect(await recipe.resolveBoxCost([1], 'FULL', 1)).toEqual([
             { stock_id: tepung.id, qty_gram: 50 },
@@ -81,7 +80,7 @@ describe.skipIf(!hasTestDb)('stock & recipe services (local Postgres)', () => {
             { stock_id: tepung.id, qty_gram: 50 },
             { stock_id: coklat.id, qty_gram: 15 },
         ]);
-        expect(await recipe.resolveBoxCost([4], 'FULL', 1)).toEqual([
+        expect(await recipe.resolveBoxCost([1, 2, 3], 'FULL', 1)).toEqual([
             { stock_id: tepung.id, qty_gram: 46.6667 },
             { stock_id: coklat.id, qty_gram: 10 },
         ]);
@@ -125,20 +124,58 @@ describe.skipIf(!hasTestDb)('stock & recipe services (local Postgres)', () => {
         await expect(stock.deleteStock(tepung.id)).rejects.toMatchObject({ status: 404 });
     });
 
-    it('variant components: rules and exposure via getVariants / catalog', async () => {
-        await expect(recipe.replaceVariantComponents(4, [4])).rejects.toThrow(/dirinya sendiri/);
-        await recipe.replaceVariantComponents(4, [1, 2, 3]);
-        await expect(recipe.replaceVariantComponents(1, [2])).rejects.toThrow(/komponen paket lain/);
+    it('menu box CRUD follows the product rules (FULL 3 rasa, HALF 1 rasa, porsi 0.5)', async () => {
+        await db.pool.query('TRUNCATE menu RESTART IDENTITY CASCADE');
+        const menu = await import('../menu.service');
+        const full = await menu.createMenu({ name: 'FULL', price: 65000 });
+        const half = await menu.createMenu({ name: 'HALF', price: 35000 });
+        expect(full).toMatchObject({ max_flavors: 3, box_multiplier: 1, weight_gram: 1000 });
+        expect(half).toMatchObject({ max_flavors: 1, box_multiplier: 0.5, weight_gram: 500 });
 
-        const variants = await variant.getVariants();
-        expect(variants.find(v => v.id === 4)?.component_ids).toEqual([1, 2, 3]);
-        expect(variants.find(v => v.id === 1)?.component_ids).toEqual([]);
+        await expect(menu.createMenu({ name: 'FULL', price: 1 })).rejects.toMatchObject({ status: 409 });
+        await expect(menu.createMenu({ name: 'HAMPERS', price: 1 })).rejects.toMatchObject({ status: 400 });
+        await expect(menu.updateMenu(half.id, { max_flavors: 2 })).rejects.toThrow(/1–1/);
+        await expect(menu.updateMenu(full.id, { max_flavors: 4 })).rejects.toThrow(/1–3/);
+        await expect(menu.updateMenu(full.id, { name: 'HALF' })).rejects.toMatchObject({ status: 400 });
+        expect((await menu.updateMenu(full.id, { max_flavors: 2, price: 70000 }))).toMatchObject({ max_flavors: 2, price: 70000 });
 
         const catalog = await recipe.loadVariantCatalog();
-        expect([...catalog.presetIds]).toEqual([4]);
-        expect(catalog.maxFlavors.get('FULL')).toBe(3);
+        expect(catalog.maxFlavors.get('HALF')).toBe(1);
+        await menu.deleteMenu(half.id);
+        await expect(menu.deleteMenu(half.id)).rejects.toMatchObject({ status: 404 });
+    });
 
-        await recipe.replaceVariantComponents(4, []);
-        expect((await recipe.loadVariantCatalog()).presetIds.size).toBe(0);
+    it('variant CRUD: unique names (case-insensitive), used flavors can only be deactivated', async () => {
+        const variant = await import('../variant.service');
+        const v = await variant.createVariant({ variant_name: '  Choco   Cheese ', store_ids: [1, 2] });
+        expect(v).toMatchObject({ variant_name: 'Choco Cheese', is_active: true, store_ids: [1, 2] });
+        await expect(variant.createVariant({ variant_name: 'choco cheese' })).rejects.toMatchObject({ status: 409 });
+        await expect(variant.createVariant({ variant_name: '' })).rejects.toMatchObject({ status: 400 });
+        expect((await variant.updateVariant(v.id, { variant_name: 'Choco Cheese', is_active: false })).is_active).toBe(false);
+
+        // Used in an order → delete refused, deactivate still possible.
+        await db.pool.query(`INSERT INTO orders (customer_name, customer_phone, pickup_date, status, store_id) VALUES ('A', '0812', '2099-01-05', 'UNPAID', 1)`);
+        await db.pool.query(`INSERT INTO order_items (order_id, box_type, name, qty) VALUES (currval('orders_id_seq'), 'FULL', 'Choco Cheese', 1)`);
+        await db.pool.query(`INSERT INTO order_item_variants (order_item_id, variant_id) VALUES (currval('order_items_id_seq'), $1)`, [v.id]);
+        await expect(variant.deleteVariant(v.id)).rejects.toThrow(/Nonaktifkan/);
+
+        const unused = await variant.createVariant({ variant_name: 'Vanila Cheese' });
+        await variant.deleteVariant(unused.id);
+        await expect(variant.deleteVariant(unused.id)).rejects.toMatchObject({ status: 404 });
+        await db.pool.query('TRUNCATE orders, order_items, order_item_variants RESTART IDENTITY CASCADE');
+    });
+
+    it('setup status reflects what a store still needs', async () => {
+        const { getSetupStatus } = await import('../setup.service');
+        const steps = await getSetupStatus(1);
+        const byKey = Object.fromEntries(steps.map(s => [s.key, s]));
+        expect(byKey.menu.state).toBe('done');       // FULL + HALF with price, available in stores {1,2} (column default)
+        expect(byKey.variants.state).toBe('done');   // 3 active variants from beforeEach
+        expect(byKey.recipes.state).toBe('todo');    // none of them has a recipe yet
+        expect(byKey.quota.state).toBe('todo');
+
+        await db.pool.query(`UPDATE menu SET store_ids = '{2}' WHERE name = 'HALF'`);
+        expect((await getSetupStatus(1)).find(s => s.key === 'menu')?.state).toBe('partial');
+        expect(byKey.salary.href).toBe('/config/salary');
     });
 });

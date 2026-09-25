@@ -25,6 +25,7 @@ export interface UpdateStorePayload {
     bank_name?: string | null;
     bank_account_number?: string | null;
     bank_account_name?: string | null;
+    qris_image_url?: string | null;
 }
 
 export const updateStore = async (id: number, payload: UpdateStorePayload) => {
@@ -40,6 +41,7 @@ export const updateStore = async (id: number, payload: UpdateStorePayload) => {
         bank_name: payload.bank_name,
         bank_account_number: payload.bank_account_number,
         bank_account_name: payload.bank_account_name,
+        qris_image_url: payload.qris_image_url,
         updated_at: new Date().toISOString(),
     });
     if (!data) throw new NotFoundError(`Store dengan id ${id} tidak ditemukan`);

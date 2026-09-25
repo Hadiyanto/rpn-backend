@@ -1,15 +1,13 @@
 import type { PoolClient } from 'pg';
 import { pool, transaction } from '../config/db';
 import { ValidationError } from '../utils/validation';
+import { boxRule } from '../utils/boxRules';
 
 type Queryable = Pick<PoolClient, 'query'>;
 
 // Recipes are entered in grams; only stock items tracked in grams may be used.
 const GRAM_UNITS = ['gram', 'g', 'gr'];
 export const isGramUnit = (unit: string | null | undefined) => GRAM_UNITS.includes((unit ?? '').trim().toLowerCase());
-
-// Fallback when a menu row has no box_multiplier yet.
-const DEFAULT_MULTIPLIER: Record<string, number> = { FULL: 1, HALF: 0.5 };
 
 export interface RecipeLine {
     stock_id: number;
@@ -23,27 +21,21 @@ export interface StockUsage {
 
 /**
  * Pure core of the "stock per box" rule (shared by HPP and auto-deduction):
- *  1. Preset mixes expand into their component flavors.
- *  2. Each leaf flavor gets weight 1/N of the box.
- *  3. Recipes are defined per FULL box; box_multiplier scales them (HALF = 0.5).
+ *  1. Each chosen flavor gets weight 1/N of the box (N = number of different flavors, max 3 for FULL).
+ *  2. Recipes are defined per FULL box; box_multiplier scales them (HALF = 0.5).
  * Flavors without a recipe simply contribute nothing.
  */
 export const computeBoxCost = (
     variantIds: number[],
     boxMultiplier: number,
-    components: Map<number, number[]>,
     recipes: Map<number, RecipeLine[]>,
 ): StockUsage[] => {
-    const leaves = variantIds.flatMap(id => {
-        const parts = components.get(id);
-        return parts && parts.length > 0 ? parts : [id];
-    });
-    if (leaves.length === 0) return [];
+    if (variantIds.length === 0) return [];
 
-    const weight = 1 / leaves.length;
+    const weight = 1 / variantIds.length;
     const byStock = new Map<number, number>();
-    for (const leaf of leaves) {
-        for (const line of recipes.get(leaf) ?? []) {
+    for (const id of variantIds) {
+        for (const line of recipes.get(id) ?? []) {
             byStock.set(line.stock_id, (byStock.get(line.stock_id) ?? 0) + line.qty_gram * boxMultiplier * weight);
         }
     }
@@ -53,22 +45,9 @@ export const computeBoxCost = (
         .sort((a, b) => a.stock_id - b.stock_id);
 };
 
-const loadComponents = async (db: Queryable, variantIds: number[]) => {
-    const components = new Map<number, number[]>();
-    if (variantIds.length === 0) return components;
-    const { rows } = await db.query(
-        'SELECT variant_id, component_variant_id FROM variant_components WHERE variant_id = ANY($1::int[]) ORDER BY component_variant_id',
-        [variantIds]
-    );
-    for (const row of rows) {
-        components.set(row.variant_id, [...(components.get(row.variant_id) ?? []), row.component_variant_id]);
-    }
-    return components;
-};
-
 export const getBoxMultiplier = async (db: Queryable, boxType: string) => {
     const { rows } = await db.query('SELECT box_multiplier FROM menu WHERE name = $1 ORDER BY is_active DESC NULLS LAST LIMIT 1', [boxType]);
-    return rows[0] ? Number(rows[0].box_multiplier) : (DEFAULT_MULTIPLIER[boxType] ?? 1);
+    return rows[0] ? Number(rows[0].box_multiplier) : (boxRule(boxType)?.box_multiplier ?? 1);
 };
 
 /** Grams of each stock item used by ONE box of `boxType` made of `variantIds` at `storeId`. */
@@ -80,19 +59,16 @@ export const resolveBoxCost = async (
 ): Promise<StockUsage[]> => {
     if (variantIds.length === 0) return [];
 
-    const components = await loadComponents(db, variantIds);
-    const leafIds = [...new Set(variantIds.flatMap(id => components.get(id) ?? [id]))];
-
     const { rows } = await db.query(
         'SELECT variant_id, stock_id, qty_gram FROM variant_recipe WHERE store_id = $1 AND variant_id = ANY($2::int[])',
-        [storeId, leafIds]
+        [storeId, variantIds]
     );
     const recipes = new Map<number, RecipeLine[]>();
     for (const row of rows) {
         recipes.set(row.variant_id, [...(recipes.get(row.variant_id) ?? []), { stock_id: row.stock_id, qty_gram: Number(row.qty_gram) }]);
     }
 
-    return computeBoxCost(variantIds, await getBoxMultiplier(db, boxType), components, recipes);
+    return computeBoxCost(variantIds, await getBoxMultiplier(db, boxType), recipes);
 };
 
 // ---------------------------------------------------------------------------
@@ -155,11 +131,13 @@ export const getVariantHpp = async (variantIds: number[], boxType: string, store
 
 export interface VariantCatalog {
     activeIds: Set<number>;
-    presetIds: Set<number>;
     maxFlavors: Map<string, number>;
 }
 
-/** Pure check of one order item's variant_ids against the catalog. */
+/**
+ * Pure check of one order item's variant_ids: 1..max different, active flavors.
+ * max comes from menu.max_flavors, falling back to the product rules (FULL 3, HALF 1).
+ */
 export const checkVariantSelection = (variantIds: unknown, boxType: string, catalog: VariantCatalog, label = 'Item'): number[] => {
     if (!Array.isArray(variantIds) || variantIds.length === 0) {
         throw new ValidationError(`${label}: pilih minimal 1 rasa`);
@@ -175,26 +153,20 @@ export const checkVariantSelection = (variantIds: unknown, boxType: string, cata
     if (inactive.length > 0) {
         throw new ValidationError(`${label}: rasa tidak tersedia (id ${inactive.join(', ')})`);
     }
-    const hasPreset = ids.some(id => catalog.presetIds.has(id));
-    if (hasPreset && ids.length > 1) {
-        throw new ValidationError(`${label}: paket mix tidak bisa dicampur dengan rasa lain`);
-    }
-    const max = catalog.maxFlavors.get(boxType) ?? 1;
-    if (!hasPreset && ids.length > max) {
+    const max = catalog.maxFlavors.get(boxType) ?? boxRule(boxType)?.max_flavors ?? 1;
+    if (ids.length > max) {
         throw new ValidationError(`${label}: maksimal ${max} rasa untuk box ${boxType}`);
     }
     return ids;
 };
 
 export const loadVariantCatalog = async (db: Queryable = pool): Promise<VariantCatalog> => {
-    const [variants, presets, menus] = await Promise.all([
+    const [variants, menus] = await Promise.all([
         db.query('SELECT id FROM variant WHERE is_active IS NOT FALSE'),
-        db.query('SELECT DISTINCT variant_id FROM variant_components'),
         db.query('SELECT name, max_flavors FROM menu'),
     ]);
     return {
         activeIds: new Set(variants.rows.map(r => r.id)),
-        presetIds: new Set(presets.rows.map(r => r.variant_id)),
         maxFlavors: new Map(menus.rows.map(r => [r.name, Number(r.max_flavors)])),
     };
 };
@@ -279,52 +251,4 @@ export const replaceVariantRecipe = async (variant_id: number, store_id: number,
 export const deleteVariantRecipeLine = async (id: number) => {
     await pool.query('DELETE FROM variant_recipe WHERE id = $1', [id]);
     return true;
-};
-
-// ---------------------------------------------------------------------------
-// Preset mix components
-// ---------------------------------------------------------------------------
-
-export const getVariantComponents = async (variant_id?: number) => {
-    const { rows } = variant_id
-        ? await pool.query('SELECT * FROM variant_components WHERE variant_id = $1 ORDER BY component_variant_id', [variant_id])
-        : await pool.query('SELECT * FROM variant_components ORDER BY variant_id, component_variant_id');
-    return rows;
-};
-
-/** Replaces the component list of a preset mix. An empty list turns it back into a normal flavor. */
-export const replaceVariantComponents = async (variant_id: number, componentIds: unknown) => {
-    if (!Number.isInteger(variant_id) || variant_id < 1) throw new ValidationError('variant_id tidak valid');
-    if (!Array.isArray(componentIds)) throw new ValidationError('component_ids harus berupa array');
-
-    const ids = [...new Set(componentIds.map(Number))];
-    if (ids.some(id => !Number.isInteger(id) || id < 1)) throw new ValidationError('component_ids tidak valid');
-    if (ids.includes(variant_id)) throw new ValidationError('Variant tidak bisa menjadi komponen dirinya sendiri');
-
-    return transaction(async (client) => {
-        if (ids.length > 0) {
-            const { rows: found } = await client.query('SELECT id FROM variant WHERE id = ANY($1::int[])', [ids]);
-            if (found.length !== ids.length) throw new ValidationError('Sebagian komponen tidak ditemukan');
-
-            // One level only: a component must be a plain flavor, not another preset.
-            const { rows: nested } = await client.query(
-                'SELECT DISTINCT variant_id FROM variant_components WHERE variant_id = ANY($1::int[])',
-                [ids]
-            );
-            if (nested.length > 0) throw new ValidationError('Komponen tidak boleh berupa paket mix lain');
-
-            // And this variant must not already be used as a component of another preset.
-            const { rows: usedAsComponent } = await client.query(
-                'SELECT 1 FROM variant_components WHERE component_variant_id = $1 LIMIT 1',
-                [variant_id]
-            );
-            if (usedAsComponent.length > 0) throw new ValidationError('Variant ini dipakai sebagai komponen paket lain');
-        }
-
-        await client.query('DELETE FROM variant_components WHERE variant_id = $1', [variant_id]);
-        for (const id of ids) {
-            await client.query('INSERT INTO variant_components (variant_id, component_variant_id) VALUES ($1, $2)', [variant_id, id]);
-        }
-        return ids;
-    });
 };

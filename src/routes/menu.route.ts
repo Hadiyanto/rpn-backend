@@ -6,7 +6,12 @@ import { redis } from '../config/redis';
 const router = Router();
 
 // Bump the version whenever the menu row shape changes so stale cached lists are ignored.
-export const MENU_CACHE_KEY = 'menu_list:v2';
+export const MENU_CACHE_KEY = 'menu_list:v3';
+
+const pickMenuFields = (body: any) => {
+    const { name, price, description, is_active, store_ids, box_multiplier, max_flavors, weight_gram, length_cm, width_cm, height_cm } = body ?? {};
+    return { name, price, description, is_active, store_ids, box_multiplier, max_flavors, weight_gram, length_cm, width_cm, height_cm };
+};
 
 router.get('/menu', async (req, res) => {
     try {
@@ -31,11 +36,7 @@ router.get('/menu', async (req, res) => {
 
 router.post('/menu', async (req, res) => {
     try {
-        const { name, price, description, is_active } = req.body;
-        if (!name || price === undefined) {
-            return res.status(400).json({ status: 'error', message: 'name and price are required' });
-        }
-        const data = await createMenu(name, price, description, is_active);
+        const data = await createMenu(pickMenuFields(req.body));
         await redis.del(MENU_CACHE_KEY);
         res.json({ status: 'ok', data });
     } catch (e: any) {
@@ -46,8 +47,7 @@ router.post('/menu', async (req, res) => {
 router.put('/menu/:id', async (req, res) => {
     try {
         const id = parseInt(req.params.id);
-        const { name, price, description, is_active, store_ids, box_multiplier, max_flavors } = req.body;
-        const data = await updateMenu(id, { name, price, description, is_active, store_ids, box_multiplier, max_flavors });
+        const data = await updateMenu(id, pickMenuFields(req.body));
         await redis.del(MENU_CACHE_KEY);
         res.json({ status: 'ok', data });
     } catch (e: any) {

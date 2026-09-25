@@ -4,12 +4,8 @@ import {
     getVariantRecipes,
     replaceVariantRecipe,
     deleteVariantRecipeLine,
-    getVariantComponents,
-    replaceVariantComponents,
     getVariantHpp,
 } from '../services/variantRecipe.service';
-import { redis } from '../config/redis';
-import { VARIANT_CACHE_KEY } from './variant.route';
 
 const router = Router();
 
@@ -63,29 +59,6 @@ router.get('/variant-hpp', async (req, res) => {
             return;
         }
         const data = await getVariantHpp(variantIds, boxType, storeId);
-        res.json({ status: 'ok', data });
-    } catch (e: any) {
-        sendError(res, e);
-    }
-});
-
-// GET /variant-components[?variant_id=18]
-router.get('/variant-components', async (req, res) => {
-    try {
-        const variant_id = req.query.variant_id ? Number(req.query.variant_id) : undefined;
-        const data = await getVariantComponents(variant_id);
-        res.json({ status: 'ok', data });
-    } catch (e: any) {
-        sendError(res, e);
-    }
-});
-
-// PUT /variant-components  { variant_id, component_ids: number[] }
-router.put('/variant-components', async (req, res) => {
-    try {
-        const { variant_id, component_ids } = req.body;
-        const data = await replaceVariantComponents(Number(variant_id), component_ids);
-        await redis.del(VARIANT_CACHE_KEY); // variant list embeds component_ids
         res.json({ status: 'ok', data });
     } catch (e: any) {
         sendError(res, e);

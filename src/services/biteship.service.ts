@@ -1,7 +1,7 @@
 import { pool } from '../config/db';
 import { biteshipGet, biteshipPost } from '../utils/biteship';
 import { getStoreById } from './store.service';
-import { getMenuPriceMap } from './menu.service';
+import { getMenuBoxMap, boxShippingItem } from './menu.service';
 import { todayWIB } from '../utils/date';
 import { boxLabel } from '../utils/boxLabel';
 
@@ -70,7 +70,7 @@ export const createBiteshipDispatch = async (order: any): Promise<DispatchResult
         // "Today" is a WIB calendar day. The server runs in UTC, so its local date is
         // still yesterday between 00:00 and 07:00 WIB.
         const isToday = order.pickup_date === todayWIB();
-        const prices = await getMenuPriceMap();
+        const boxes = await getMenuBoxMap();
 
         const payload: Record<string, any> = {
             // Shipper = toko asal (per store_id order ini)
@@ -101,11 +101,7 @@ export const createBiteshipDispatch = async (order: any): Promise<DispatchResult
             items: (order.items || []).map((item: any) => ({
                 name: `${boxLabel(item.box_type)} - ${item.name}`,
                 description: `RPN ${item.box_type}`,
-                value: prices.get(item.box_type) ?? 0,
-                length: item.box_type === 'FULL' ? 20 : 10,
-                width: item.box_type === 'FULL' ? 20 : 10,
-                height: 10,
-                weight: item.box_type === 'FULL' ? 1000 : 500,
+                ...boxShippingItem(boxes.get(item.box_type), item.box_type),
                 quantity: item.qty,
             })),
             order_note: `RPN Order #${order.id}${order.note ? ` - ${order.note}` : ''}`,

@@ -29,7 +29,8 @@ describe.skipIf(!hasTestDb)('quota under load (local Postgres + in-memory Redis)
 
     beforeEach(async () => {
         fakeRedis.store.clear();
-        await db.pool.query('TRUNCATE orders, order_items, daily_quota, hourly_quota RESTART IDENTITY CASCADE');
+        await db.pool.query('TRUNCATE orders, order_items, daily_quota, hourly_quota, menu RESTART IDENTITY CASCADE');
+        await db.pool.query(`INSERT INTO menu (name, price, max_flavors, box_multiplier) VALUES ('FULL', 65000, 3, 1), ('HALF', 35000, 1, 0.5)`);
         await db.pool.query(`INSERT INTO daily_quota (date, qty, store_id) VALUES ($1, 10, 1)`, [DATE]);
     });
 

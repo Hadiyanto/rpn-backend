@@ -37,7 +37,7 @@ describe.skipIf(!hasTestDb)('auto stock deduction lifecycle', () => {
 
     beforeEach(async () => {
         fakeRedis.store.clear();
-        await db.pool.query('TRUNCATE orders, order_items, order_item_variants, variant_recipe, variant_components, stock_history, stock, daily_quota, variant, menu RESTART IDENTITY CASCADE');
+        await db.pool.query('TRUNCATE orders, order_items, order_item_variants, variant_recipe, stock_history, stock, daily_quota, variant, menu RESTART IDENTITY CASCADE');
         await db.pool.query(`INSERT INTO menu (name, price, box_multiplier, max_flavors) VALUES ('FULL', 65000, 1, 3), ('HALF', 35000, 0.5, 1)`);
         await db.pool.query(`INSERT INTO variant (variant_name) VALUES ('Dark Choco'), ('Vanilla')`);
         await db.pool.query(`INSERT INTO daily_quota (date, qty, store_id) VALUES ($1, 100, 1)`, [DATE]);

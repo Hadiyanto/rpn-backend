@@ -20,6 +20,7 @@ import salaryRoute from './salary.route';
 import biteshipRoute from './biteship.route';
 import storeRoute from './store.route';
 import variantRecipeRoute from './variantRecipe.route';
+import setupRoute from './setup.route';
 
 const router = Router();
 
@@ -43,6 +44,7 @@ router.use(salaryRoute);
 router.use(biteshipRoute);
 router.use(storeRoute);
 router.use(variantRecipeRoute);
+router.use(setupRoute);
 
 export default router;
 

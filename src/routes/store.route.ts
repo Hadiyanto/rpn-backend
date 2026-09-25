@@ -34,8 +34,8 @@ router.put('/stores/:id', async (req, res) => {
             res.status(400).json({ status: 'error', message: 'id tidak valid' });
             return;
         }
-        const { name, address, area_id, latitude, longitude, phone, is_active, open_time, bank_name, bank_account_number, bank_account_name } = req.body;
-        const data = await updateStore(id, { name, address, area_id, latitude, longitude, phone, is_active, open_time, bank_name, bank_account_number, bank_account_name });
+        const { name, address, area_id, latitude, longitude, phone, is_active, open_time, bank_name, bank_account_number, bank_account_name, qris_image_url } = req.body;
+        const data = await updateStore(id, { name, address, area_id, latitude, longitude, phone, is_active, open_time, bank_name, bank_account_number, bank_account_name, qris_image_url });
         res.json({ status: 'ok', data });
     } catch (e: any) {
         sendError(res, e);

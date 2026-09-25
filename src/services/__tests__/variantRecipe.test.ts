@@ -6,25 +6,23 @@ import { ValidationError } from '../../utils/validation';
 const DARK_CHOCO = 10;
 const VANILLA = 11;
 const CHEESE = 12;
-const MIX3 = 18; // preset made of the three flavors above
 
 const recipes = new Map<number, RecipeLine[]>([
     [DARK_CHOCO, [{ stock_id: 1, qty_gram: 50 }, { stock_id: 2, qty_gram: 30 }]],
     [VANILLA, [{ stock_id: 1, qty_gram: 50 }]],
     [CHEESE, [{ stock_id: 1, qty_gram: 40 }, { stock_id: 3, qty_gram: 60 }]],
 ]);
-const components = new Map<number, number[]>([[MIX3, [DARK_CHOCO, VANILLA, CHEESE]]]);
 
 describe('computeBoxCost', () => {
     it('single flavor FULL box uses the full recipe', () => {
-        expect(computeBoxCost([DARK_CHOCO], 1, components, recipes)).toEqual([
+        expect(computeBoxCost([DARK_CHOCO], 1, recipes)).toEqual([
             { stock_id: 1, qty_gram: 50 },
             { stock_id: 2, qty_gram: 30 },
         ]);
     });
 
     it('HALF box scales by box_multiplier', () => {
-        expect(computeBoxCost([DARK_CHOCO], 0.5, components, recipes)).toEqual([
+        expect(computeBoxCost([DARK_CHOCO], 0.5, recipes)).toEqual([
             { stock_id: 1, qty_gram: 25 },
             { stock_id: 2, qty_gram: 15 },
         ]);
@@ -32,15 +30,15 @@ describe('computeBoxCost', () => {
 
     it('2-flavor mix gives each flavor half of its recipe', () => {
         // Tepung: 50/2 + 50/2 = 50, Cokelat: 30/2 = 15
-        expect(computeBoxCost([DARK_CHOCO, VANILLA], 1, components, recipes)).toEqual([
+        expect(computeBoxCost([DARK_CHOCO, VANILLA], 1, recipes)).toEqual([
             { stock_id: 1, qty_gram: 50 },
             { stock_id: 2, qty_gram: 15 },
         ]);
     });
 
-    it('preset mix expands into its components (1/3 each)', () => {
+    it('3-flavor FULL mix gives each flavor 1/3 of its recipe', () => {
         // Tepung: (50+50+40)/3 = 46.6667, Cokelat: 30/3 = 10, Keju: 60/3 = 20
-        expect(computeBoxCost([MIX3], 1, components, recipes)).toEqual([
+        expect(computeBoxCost([DARK_CHOCO, VANILLA, CHEESE], 1, recipes)).toEqual([
             { stock_id: 1, qty_gram: 46.6667 },
             { stock_id: 2, qty_gram: 10 },
             { stock_id: 3, qty_gram: 20 },
@@ -49,24 +47,29 @@ describe('computeBoxCost', () => {
 
     it('flavors without a recipe still count toward 1/N but add nothing', () => {
         // Vanilla has recipe, 99 has none → Tepung 50/2 = 25
-        expect(computeBoxCost([VANILLA, 99], 1, components, recipes)).toEqual([{ stock_id: 1, qty_gram: 25 }]);
+        expect(computeBoxCost([VANILLA, 99], 1, recipes)).toEqual([{ stock_id: 1, qty_gram: 25 }]);
     });
 
     it('no variants → no usage', () => {
-        expect(computeBoxCost([], 1, components, recipes)).toEqual([]);
+        expect(computeBoxCost([], 1, recipes)).toEqual([]);
     });
 });
 
 describe('checkVariantSelection', () => {
     const catalog: VariantCatalog = {
-        activeIds: new Set([DARK_CHOCO, VANILLA, CHEESE, 13, MIX3]),
-        presetIds: new Set([MIX3]),
+        activeIds: new Set([DARK_CHOCO, VANILLA, CHEESE, 13]),
         maxFlavors: new Map([['FULL', 3], ['HALF', 1]]),
     };
 
+    it('falls back to the product rules when a box has no menu row (FULL 3, HALF 1)', () => {
+        const bare: VariantCatalog = { activeIds: catalog.activeIds, maxFlavors: new Map() };
+        expect(checkVariantSelection([DARK_CHOCO, VANILLA, CHEESE], 'FULL', bare)).toHaveLength(3);
+        expect(() => checkVariantSelection([DARK_CHOCO, VANILLA], 'HALF', bare)).toThrow(/maksimal 1 rasa/);
+    });
+
     it('accepts valid selections', () => {
         expect(checkVariantSelection([DARK_CHOCO, VANILLA], 'FULL', catalog)).toEqual([DARK_CHOCO, VANILLA]);
-        expect(checkVariantSelection([MIX3], 'FULL', catalog)).toEqual([MIX3]);
+        expect(checkVariantSelection([DARK_CHOCO, VANILLA, CHEESE], 'FULL', catalog)).toEqual([DARK_CHOCO, VANILLA, CHEESE]);
         expect(checkVariantSelection(['11'], 'HALF', catalog)).toEqual([VANILLA]);
     });
 
@@ -77,7 +80,6 @@ describe('checkVariantSelection', () => {
         ['too many for FULL', [DARK_CHOCO, VANILLA, CHEESE, 13], 'FULL'],
         ['inactive / unknown', [999], 'FULL'],
         ['duplicate', [VANILLA, VANILLA], 'FULL'],
-        ['preset mixed with a flavor', [MIX3, VANILLA], 'FULL'],
         ['invalid id', [0], 'FULL'],
     ])('rejects %s', (_label, ids, boxType) => {
         expect(() => checkVariantSelection(ids, boxType as string, catalog)).toThrow(ValidationError);
