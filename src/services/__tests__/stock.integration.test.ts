@@ -39,6 +39,12 @@ describe.skipIf(!hasTestDb)('stock & recipe services (local Postgres)', () => {
         expect(await stock.getStocks(2)).toEqual([]);
     });
 
+    it('refuses a duplicate item name in the same store, allows it in another', async () => {
+        await stock.createStock({ item_name: 'Cokelat', unit: 'gram', store_id: 1 });
+        await expect(stock.createStock({ item_name: ' cokelat ', unit: 'gram', store_id: 1 })).rejects.toMatchObject({ status: 409 });
+        await expect(stock.createStock({ item_name: 'Cokelat', unit: 'gram', store_id: 2 })).resolves.toMatchObject({ store_id: 2 });
+    });
+
     it('allows stock to go negative (stock_qty_check dropped)', async () => {
         const s = await stock.createStock({ item_name: 'Keju', unit: 'gram', store_id: 1 });
         const updated = await stock.adjustStock({ stock_id: s.id, qty_change: -50, type: 'OUT' });

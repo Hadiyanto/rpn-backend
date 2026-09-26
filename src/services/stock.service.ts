@@ -44,6 +44,11 @@ export const createStock = async (payload: CreateStockDTO) => {
     const price_per_unit = parsePricePerUnit(payload.price_per_unit) ?? null;
 
     return transaction(async (client) => {
+        const { rowCount } = await client.query(
+            'SELECT 1 FROM stock WHERE store_id = $1 AND lower(item_name) = lower($2)',
+            [store_id, item_name]
+        );
+        if (rowCount) throw new ConflictError(`Bahan "${item_name}" sudah ada di store ini`);
         const { rows: [stock] } = await client.query(
             'INSERT INTO stock (item_name, unit, store_id, qty, price_per_unit) VALUES ($1, $2, $3, $4, $5) RETURNING *',
             [item_name, unit, store_id, qty, price_per_unit]
