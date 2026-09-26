@@ -9,6 +9,9 @@ import {
     getVariantHpp,
     getGramSuggestions,
     copyVariantRecipes,
+    getBaseRecipe,
+    replaceBaseRecipe,
+    copyBaseRecipe,
 } from '../services/variantRecipe.service';
 
 const router = Router();
@@ -68,6 +71,35 @@ router.delete('/variant-recipe/:id', async (req, res) => {
         await deleteVariantRecipeLine(Number(req.params.id));
         await redis.del(VARIANT_CACHE_KEY);
         res.json({ status: 'ok' });
+    } catch (e: any) {
+        sendError(res, e);
+    }
+});
+
+// GET /base-recipe?store_id=1 → ingredients used by every box at that store
+router.get('/base-recipe', async (req, res) => {
+    try {
+        res.json({ status: 'ok', data: await getBaseRecipe(Number(req.query.store_id)) });
+    } catch (e: any) {
+        sendError(res, e);
+    }
+});
+
+// PUT /base-recipe  { store_id, items: [{ stock_id, qty_gram }] }
+router.put('/base-recipe', async (req, res) => {
+    try {
+        const { store_id, items } = req.body ?? {};
+        res.json({ status: 'ok', data: await replaceBaseRecipe(Number(store_id), items) });
+    } catch (e: any) {
+        sendError(res, e);
+    }
+});
+
+// POST /base-recipe/copy  { from_store_id, to_store_id }
+router.post('/base-recipe/copy', async (req, res) => {
+    try {
+        const { from_store_id, to_store_id } = req.body ?? {};
+        res.json({ status: 'ok', data: await copyBaseRecipe(Number(from_store_id), Number(to_store_id)) });
     } catch (e: any) {
         sendError(res, e);
     }

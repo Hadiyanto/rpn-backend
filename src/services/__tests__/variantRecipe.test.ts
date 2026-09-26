@@ -14,6 +14,21 @@ const recipes = new Map<number, RecipeLine[]>([
 ]);
 
 describe('computeBoxCost', () => {
+    it('base recipe is added once per box, scaled by box_multiplier, not split by flavor', () => {
+        // 4 = T.Panir 100 g, 5 = T.Sasa not measured yet (0 g → ignored)
+        const base = [{ stock_id: 4, qty_gram: 100 }, { stock_id: 5, qty_gram: 0 }];
+        expect(computeBoxCost([DARK_CHOCO, VANILLA], 1, recipes, base)).toEqual([
+            { stock_id: 1, qty_gram: 50 },
+            { stock_id: 2, qty_gram: 15 },
+            { stock_id: 4, qty_gram: 100 },
+        ]);
+        expect(computeBoxCost([VANILLA], 0.5, recipes, base)).toEqual([
+            { stock_id: 1, qty_gram: 25 },
+            { stock_id: 4, qty_gram: 50 },
+        ]);
+        expect(computeBoxCost([], 1, recipes, base)).toEqual([]);
+    });
+
     it('single flavor FULL box uses the full recipe', () => {
         expect(computeBoxCost([DARK_CHOCO], 1, recipes)).toEqual([
             { stock_id: 1, qty_gram: 50 },

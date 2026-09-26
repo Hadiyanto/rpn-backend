@@ -23,17 +23,23 @@ export interface StockUsage {
  * Pure core of the "stock per box" rule (shared by HPP and auto-deduction):
  *  1. Each chosen flavor gets weight 1/N of the box (N = number of different flavors, max 3 for FULL).
  *  2. Recipes are defined per FULL box; box_multiplier scales them (HALF = 0.5).
+ *  3. The store's base recipe ("bahan dasar", e.g. batter) is used once per box, whatever the
+ *     flavors: scaled by box_multiplier, not split between flavors.
  * Flavors without a recipe simply contribute nothing.
  */
 export const computeBoxCost = (
     variantIds: number[],
     boxMultiplier: number,
     recipes: Map<number, RecipeLine[]>,
+    base: RecipeLine[] = [],
 ): StockUsage[] => {
     if (variantIds.length === 0) return [];
 
     const weight = 1 / variantIds.length;
     const byStock = new Map<number, number>();
+    for (const line of base) {
+        if (line.qty_gram > 0) byStock.set(line.stock_id, (byStock.get(line.stock_id) ?? 0) + line.qty_gram * boxMultiplier);
+    }
     for (const id of variantIds) {
         for (const line of recipes.get(id) ?? []) {
             byStock.set(line.stock_id, (byStock.get(line.stock_id) ?? 0) + line.qty_gram * boxMultiplier * weight);
@@ -41,6 +47,7 @@ export const computeBoxCost = (
     }
 
     return [...byStock.entries()]
+        .filter(([, qty_gram]) => qty_gram > 0)
         .map(([stock_id, qty_gram]) => ({ stock_id, qty_gram: Math.round(qty_gram * 10000) / 10000 }))
         .sort((a, b) => a.stock_id - b.stock_id);
 };
@@ -68,7 +75,10 @@ export const resolveBoxCost = async (
         recipes.set(row.variant_id, [...(recipes.get(row.variant_id) ?? []), { stock_id: row.stock_id, qty_gram: Number(row.qty_gram) }]);
     }
 
-    return computeBoxCost(variantIds, await getBoxMultiplier(db, boxType), recipes);
+    const { rows: baseRows } = await db.query('SELECT stock_id, qty_gram FROM base_recipe WHERE store_id = $1', [storeId]);
+    const base = baseRows.map(r => ({ stock_id: r.stock_id, qty_gram: Number(r.qty_gram) }));
+
+    return computeBoxCost(variantIds, await getBoxMultiplier(db, boxType), recipes, base);
 };
 
 // ---------------------------------------------------------------------------
@@ -192,6 +202,24 @@ export const getVariantRecipes = async (filter: { store_id: number; variant_id?:
     return rows;
 };
 
+/** Checks that every line uses a gram-tracked stock item of this store. */
+const assertStoreGramStock = async (client: Queryable, store_id: number, lines: RecipeLine[]) => {
+    if (lines.length === 0) return;
+    const { rows: stocks } = await client.query(
+        'SELECT id, item_name, unit, store_id FROM stock WHERE id = ANY($1::int[])',
+        [lines.map(l => l.stock_id)]
+    );
+    const byId = new Map(stocks.map(s => [s.id, s]));
+    for (const line of lines) {
+        const stock = byId.get(line.stock_id);
+        if (!stock) throw new ValidationError(`Stock ${line.stock_id} tidak ditemukan`);
+        if (stock.store_id !== store_id) throw new ValidationError(`${stock.item_name} bukan stok milik store ini`);
+        if (!isGramUnit(stock.unit)) {
+            throw new ValidationError(`${stock.item_name} memakai satuan "${stock.unit}"; resep hanya boleh memakai bahan bersatuan gram`);
+        }
+    }
+};
+
 /** Replaces the whole recipe of one variant at one store. */
 export const replaceVariantRecipe = async (variant_id: number, store_id: number, lines: unknown) => {
     if (!Number.isInteger(variant_id) || variant_id < 1) throw new ValidationError('variant_id tidak valid');
@@ -214,21 +242,7 @@ export const replaceVariantRecipe = async (variant_id: number, store_id: number,
         const variant = await client.query('SELECT id FROM variant WHERE id = $1', [variant_id]);
         if (variant.rowCount === 0) throw new ValidationError(`Variant ${variant_id} tidak ditemukan`);
 
-        if (parsed.length > 0) {
-            const { rows: stocks } = await client.query(
-                'SELECT id, item_name, unit, store_id FROM stock WHERE id = ANY($1::int[])',
-                [parsed.map(l => l.stock_id)]
-            );
-            const byId = new Map(stocks.map(s => [s.id, s]));
-            for (const line of parsed) {
-                const stock = byId.get(line.stock_id);
-                if (!stock) throw new ValidationError(`Stock ${line.stock_id} tidak ditemukan`);
-                if (stock.store_id !== store_id) throw new ValidationError(`${stock.item_name} bukan stok milik store ini`);
-                if (!isGramUnit(stock.unit)) {
-                    throw new ValidationError(`${stock.item_name} memakai satuan "${stock.unit}"; resep hanya boleh memakai bahan bersatuan gram`);
-                }
-            }
-        }
+        await assertStoreGramStock(client, store_id, parsed);
 
         await client.query('DELETE FROM variant_recipe WHERE variant_id = $1 AND store_id = $2', [variant_id, store_id]);
         // No recipe left at this store → the flavor can't be sold there any more.
@@ -361,5 +375,96 @@ export const copyVariantRecipes = async (fromStoreId: number, toStoreId: number,
         }
 
         return { copied_variants: copiedVariants.length, created_stock: created };
+    });
+};
+
+// ---------------------------------------------------------------------------
+// Base recipe ("bahan dasar"): ingredients used by every box at a store
+// ---------------------------------------------------------------------------
+
+export const getBaseRecipe = async (store_id: number) => {
+    if (!Number.isInteger(store_id) || store_id < 1) throw new ValidationError('store_id tidak valid');
+    const { rows } = await pool.query(`
+        SELECT br.*, s.item_name, s.unit, s.price_per_unit
+        FROM base_recipe br JOIN stock s ON s.id = br.stock_id
+        WHERE br.store_id = $1
+        ORDER BY s.item_name
+    `, [store_id]);
+    return rows;
+};
+
+/** Replaces a store's base recipe. qty_gram 0 is allowed ("not measured yet"). */
+export const replaceBaseRecipe = async (store_id: number, lines: unknown) => {
+    if (!Number.isInteger(store_id) || store_id < 1) throw new ValidationError('store_id tidak valid');
+    if (!Array.isArray(lines)) throw new ValidationError('items harus berupa array');
+
+    const parsed: RecipeLine[] = lines.map((raw, i) => {
+        const line = (raw ?? {}) as Record<string, unknown>;
+        const stock_id = Number(line.stock_id);
+        const qty_gram = line.qty_gram === '' || line.qty_gram === null || line.qty_gram === undefined ? 0 : Number(line.qty_gram);
+        if (!Number.isInteger(stock_id) || stock_id < 1) throw new ValidationError(`Baris ${i + 1}: stock_id tidak valid`);
+        if (!Number.isFinite(qty_gram) || qty_gram < 0) throw new ValidationError(`Baris ${i + 1}: gram tidak boleh negatif`);
+        return { stock_id, qty_gram };
+    });
+    if (new Set(parsed.map(l => l.stock_id)).size !== parsed.length) {
+        throw new ValidationError('Bahan yang sama tidak boleh muncul dua kali');
+    }
+
+    await transaction(async (client) => {
+        await assertStoreGramStock(client, store_id, parsed);
+        await client.query('DELETE FROM base_recipe WHERE store_id = $1', [store_id]);
+        for (const line of parsed) {
+            await client.query(
+                'INSERT INTO base_recipe (store_id, stock_id, qty_gram) VALUES ($1, $2, $3)',
+                [store_id, line.stock_id, line.qty_gram]
+            );
+        }
+    });
+    return getBaseRecipe(store_id);
+};
+
+/**
+ * Copies a store's base recipe to another store, matching ingredients by name like
+ * copyVariantRecipes (missing ones are created with stock 0). Replaces the target's base recipe.
+ */
+export const copyBaseRecipe = async (fromStoreId: number, toStoreId: number): Promise<{ copied: number; created_stock: string[] }> => {
+    if (!Number.isInteger(fromStoreId) || !Number.isInteger(toStoreId) || fromStoreId < 1 || toStoreId < 1) {
+        throw new ValidationError('store_id asal dan tujuan wajib diisi');
+    }
+    if (fromStoreId === toStoreId) throw new ValidationError('Store asal dan tujuan tidak boleh sama');
+
+    return transaction(async (client) => {
+        const target = await client.query('SELECT id FROM stores WHERE id = $1', [toStoreId]);
+        if (target.rowCount === 0) throw new ValidationError('Store tujuan tidak ditemukan');
+
+        const { rows: source } = await client.query(`
+            SELECT br.qty_gram, s.item_name, s.unit
+            FROM base_recipe br JOIN stock s ON s.id = br.stock_id
+            WHERE br.store_id = $1
+        `, [fromStoreId]);
+        if (source.length === 0) throw new ValidationError('Belum ada bahan dasar di store asal untuk disalin');
+
+        const { rows: targetStock } = await client.query('SELECT id, item_name FROM stock WHERE store_id = $1', [toStoreId]);
+        const byName = new Map(targetStock.map(s => [String(s.item_name).trim().toLowerCase(), s.id as number]));
+        const created: string[] = [];
+        for (const line of source) {
+            const name = String(line.item_name).trim();
+            if (byName.has(name.toLowerCase())) continue;
+            const { rows: [row] } = await client.query(
+                'INSERT INTO stock (item_name, unit, store_id, qty) VALUES ($1, $2, $3, 0) RETURNING id',
+                [name, line.unit, toStoreId]
+            );
+            byName.set(name.toLowerCase(), row.id);
+            created.push(name);
+        }
+
+        await client.query('DELETE FROM base_recipe WHERE store_id = $1', [toStoreId]);
+        for (const line of source) {
+            await client.query(
+                'INSERT INTO base_recipe (store_id, stock_id, qty_gram) VALUES ($1, $2, $3)',
+                [toStoreId, byName.get(String(line.item_name).trim().toLowerCase()), line.qty_gram]
+            );
+        }
+        return { copied: source.length, created_stock: created };
     });
 };

@@ -77,7 +77,10 @@ export const updateStock = async (id: number, payload: { item_name?: unknown; un
         if (!current) throw new NotFoundError(`Stock dengan id ${id} tidak ditemukan`);
 
         if (unit !== undefined && !isGramUnit(unit)) {
-            const { rowCount } = await client.query('SELECT 1 FROM variant_recipe WHERE stock_id = $1 LIMIT 1', [id]);
+            const { rowCount } = await client.query(
+                'SELECT 1 FROM variant_recipe WHERE stock_id = $1 UNION ALL SELECT 1 FROM base_recipe WHERE stock_id = $1 LIMIT 1',
+                [id]
+            );
             if (rowCount) throw new ConflictError('Bahan ini dipakai di resep, satuannya harus tetap gram');
         }
 
@@ -105,6 +108,8 @@ export const deleteStock = async (id: number) => {
     if (rows.length > 0) {
         throw new ConflictError(`Bahan masih dipakai di resep: ${rows.map(r => r.variant_name).join(', ')}. Hapus dari resep dulu.`);
     }
+    const base = await pool.query('SELECT 1 FROM base_recipe WHERE stock_id = $1 LIMIT 1', [id]);
+    if (base.rowCount) throw new ConflictError('Bahan masih dipakai sebagai bahan dasar box. Hapus dari bahan dasar dulu.');
     const { rowCount } = await pool.query('DELETE FROM stock WHERE id = $1', [id]);
     if (!rowCount) throw new NotFoundError(`Stock dengan id ${id} tidak ditemukan`);
     return true;

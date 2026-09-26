@@ -164,4 +164,33 @@ describe.skipIf(!hasTestDb)('auto stock deduction lifecycle', () => {
             await db.pool.query('ALTER TABLE variant_recipe_broken RENAME TO variant_recipe');
         }
     });
+
+    it('base recipe (bahan dasar) is deducted per box: FULL ×1, HALF ×½, any flavor', async () => {
+        const panir = await stock.createStock({ item_name: 'T.Panir', unit: 'gram', store_id: 1, qty: 1000 });
+        const sasa = await stock.createStock({ item_name: 'T.Sasa', unit: 'gram', store_id: 1, qty: 1000 });
+        await recipe.replaceBaseRecipe(1, [{ stock_id: panir.id, qty_gram: 40 }, { stock_id: sasa.id, qty_gram: '' }]);
+        const qtyOf = async (id: number) => Number((await db.pool.query('SELECT qty FROM stock WHERE id = $1', [id])).rows[0].qty);
+
+        // Vanilla has no recipe of its own; the base still applies. 2 FULL + 1 HALF = 40·2 + 20.
+        await orders.createOrder({ ...base, pesanan: [
+            { box_type: 'FULL', name: 'Vanilla', qty: 2, variant_ids: [2] },
+            { box_type: 'HALF', name: 'Dark Choco', qty: 1, variant_ids: [1] },
+        ] });
+        expect(await qtyOf(panir.id)).toBe(900);
+        expect(await qtyOf(sasa.id)).toBe(1000); // 0 g = not measured yet
+        expect(await tepungQty()).toBe(5000 - 25);
+
+        await expect(stock.deleteStock(panir.id)).rejects.toMatchObject({ status: 409 });
+        const hpp = await recipe.getVariantHpp([2], 'FULL', 1);
+        expect(hpp.breakdown.map(l => [l.item_name, l.qty_gram])).toEqual([['T.Panir', 40]]);
+    });
+
+    it('copyBaseRecipe matches ingredients by name and creates missing ones', async () => {
+        const panir = await stock.createStock({ item_name: 'T.Panir', unit: 'gram', store_id: 1 });
+        await recipe.replaceBaseRecipe(1, [{ stock_id: panir.id, qty_gram: 40 }]);
+        const result = await recipe.copyBaseRecipe(1, 2);
+        expect(result).toEqual({ copied: 1, created_stock: ['T.Panir'] });
+        const copied = await recipe.getBaseRecipe(2);
+        expect(copied.map(r => [r.item_name, r.qty_gram])).toEqual([['T.Panir', 40]]);
+    });
 });

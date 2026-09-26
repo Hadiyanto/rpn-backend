@@ -287,3 +287,13 @@ Masalah: kalau harga beli berikutnya berbeda, harga modal dulu langsung diganti 
 - Frontend: pratinjau Stok Masuk menampilkan harga beli per unit dan **harga modal baru (rata-rata)**; riwayat stok menampilkan "@ Rp x/unit" per mutasi.
 - Test: unit `stockCost.test.ts` + integration test skenario beli ulang & batal (**125 lulus**).
 - ⚠️ Prod: jalankan `npm run migrate up` (1789842085778 dan 1789842086778) sebelum deploy backend.
+
+## Bahan dasar semua box (2026-09-26) ✅
+T.Panir dan T.Sasa dipakai di setiap box apa pun rasanya, jadi tidak perlu dimasukkan ke resep tiap rasa.
+- Tabel baru `base_recipe (store_id, stock_id, qty_gram)` (migration `1789842087778`). Gram per **1 Box Besar**, per store. `qty_gram = 0` berarti belum diukur dan belum dihitung.
+  - Migration langsung mengisi T.Panir dan T.Sasa (0 g) untuk setiap store yang sudah punya bahan itu.
+- Perhitungan (`computeBoxCost`): bahan dasar × `box_multiplier` (FULL 1, HALF ½), **ditambahkan sekali per box**, tidak dibagi per rasa. Berlaku untuk HPP dan potong stok otomatis.
+- API: `GET /base-recipe?store_id=`, `PUT /base-recipe {store_id, items}`, `POST /base-recipe/copy {from_store_id, to_store_id}`.
+- Bahan yang dipakai sebagai bahan dasar tidak bisa dihapus (409) dan satuannya harus tetap gram.
+- UI: `/config` → **Varian & resep** → kartu **"Bahan dasar semua box"** di atas daftar rasa. Ada tombol salin ke store lain. Bahan dasar tidak muncul lagi di dropdown resep tiap rasa.
+- Test: **129 lulus**.
