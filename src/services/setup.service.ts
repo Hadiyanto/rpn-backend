@@ -18,7 +18,7 @@ const state = (ok: boolean, some = false): SetupState => (ok ? 'done' : some ? '
 /** Checklist of everything a store needs before it can take orders (see docs/plan-setup-dari-nol.md). */
 export const getSetupStatus = async (storeId: number): Promise<SetupStep[]> => {
     const today = todayWIB();
-    const [menus, variants, stocks, quota, hourly, salary, store] = await Promise.all([
+    const [menus, variants, stocks, quota, hourly, salary, store, packaging] = await Promise.all([
         pool.query('SELECT name, price, is_active, $1 = ANY(store_ids) AS in_store FROM menu', [storeId]),
         pool.query(`
             SELECT v.id, v.variant_name,
@@ -37,6 +37,11 @@ export const getSetupStatus = async (storeId: number): Promise<SetupStep[]> => {
         pool.query(`SELECT count(*)::int AS n FROM hourly_quota WHERE store_id = $1 AND is_active`, [storeId]),
         pool.query(`SELECT count(*)::int AS n FROM salary_config`),
         pool.query(`SELECT * FROM stores WHERE id = $1`, [storeId]),
+        pool.query(`
+            SELECT pr.box_type, pr.mode, s.price_per_unit
+            FROM packaging_rule pr JOIN stock s ON s.id = pr.stock_id
+            WHERE pr.store_id = $1
+        `, [storeId]),
     ]);
 
     const menuByName = new Map(menus.rows.map(m => [m.name, m]));
@@ -49,6 +54,9 @@ export const getSetupStatus = async (storeId: number): Promise<SetupStep[]> => {
     const sold = activeVariants.filter(v => v.is_sold);
     const s = stocks.rows[0];
     const st = store.rows[0] ?? {};
+    // Every active box type needs its own box item (a per_box rule for exactly that type).
+    const boxesWithPackaging = boxesReady.filter(b => packaging.rows.some(r => r.mode === 'per_box' && r.box_type === b));
+    const packagingWithoutPrice = packaging.rows.filter(r => r.price_per_unit === null).length;
 
     return [
         {
@@ -71,6 +79,22 @@ export const getSetupStatus = async (storeId: number): Promise<SetupStep[]> => {
             state: state(s.gram > 0 && s.gram_without_price === 0, s.gram > 0),
             detail: `${s.gram} bahan gram${s.gram_without_price ? `, ${s.gram_without_price} belum ada harga beli` : ''}`,
             href: '/stock',
+        },
+        {
+            key: 'packaging',
+            title: 'Kemasan & perlengkapan',
+            state: state(
+                packaging.rows.length > 0 && boxesWithPackaging.length === boxesReady.length && packagingWithoutPrice === 0,
+                packaging.rows.length > 0,
+            ),
+            detail: packaging.rows.length === 0
+                ? 'Belum ada aturan kemasan'
+                : [
+                    `${packaging.rows.length} aturan`,
+                    ...boxesReady.filter(b => !boxesWithPackaging.includes(b)).map(b => `${b} belum punya kemasan box`),
+                    ...(packagingWithoutPrice ? [`${packagingWithoutPrice} belum ada harga beli`] : []),
+                ].join(' · '),
+            href: '/config?tab=varian',
         },
         {
             key: 'recipes',

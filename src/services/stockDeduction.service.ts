@@ -2,6 +2,7 @@ import type { PoolClient } from 'pg';
 import { transaction } from '../config/db';
 import { resolveBoxCost, type StockUsage } from './variantRecipe.service';
 import { weightedAverageCost } from '../utils/stockCost';
+import { computePackagingUsage, loadPackagingRules, type BoxCounts } from './packaging.service';
 
 /**
  * Automatic stock movements caused by orders (Fitur 3).
@@ -112,17 +113,22 @@ export const applyOrderStock = async (orderId: number): Promise<StockResult> =>
         `, [orderId]);
 
         const withUsage = [];
+        const boxes: BoxCounts = {};
         for (const item of items) {
+            // Packaging is used by every physical box, even legacy items without variant ids.
+            boxes[item.box_type] = (boxes[item.box_type] ?? 0) + Number(item.qty);
             if (item.variant_ids.length === 0) continue; // legacy item without variant ids
             withUsage.push({ qty: item.qty, usage: await resolveBoxCost(item.variant_ids, item.box_type, order.store_id, client) });
         }
+        // Kemasan & perlengkapan: counted once for the whole order (e.g. 1 plastic bag per 2 boxes).
+        withUsage.push({ qty: 1, usage: computePackagingUsage(await loadPackagingRules(order.store_id, client), boxes) });
 
         const movements: StockResult['movements'] = [];
         for (const [stockId, grams] of aggregateDeductions(withUsage)) {
             await bookMovement(client, orderId, stockId, -grams, `Order #${orderId}`);
             movements.push({ stock_id: stockId, qty_change: -grams });
         }
-        return { status: movements.length > 0 ? 'applied' : 'skipped', reason: movements.length > 0 ? undefined : 'no recipe usage', movements };
+        return { status: movements.length > 0 ? 'applied' : 'skipped', reason: movements.length > 0 ? undefined : 'no recipe or packaging usage', movements };
     });
 
 export const reverseOrderStock = async (orderId: number): Promise<StockResult> =>

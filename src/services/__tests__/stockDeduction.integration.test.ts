@@ -193,4 +193,73 @@ describe.skipIf(!hasTestDb)('auto stock deduction lifecycle', () => {
         const copied = await recipe.getBaseRecipe(2);
         expect(copied.map(r => [r.item_name, r.qty_gram])).toEqual([['T.Panir', 40]]);
     });
+
+    describe('kemasan & perlengkapan', () => {
+        let pack: typeof import('../packaging.service');
+        const ids: Record<string, number> = {};
+        const qtyOf = async (name: string) => Number((await db.pool.query('SELECT qty FROM stock WHERE id = $1', [ids[name]])).rows[0].qty);
+        const all = async () => Object.fromEntries(await Promise.all(Object.keys(ids).map(async n => [n, await qtyOf(n)])));
+
+        beforeEach(async () => {
+            pack = await import('../packaging.service');
+            for (const name of ['Box Besar', 'Box Kecil', 'Garpu', 'Plastik Kuning', 'Sticker']) {
+                ids[name] = (await stock.createStock({ item_name: name, unit: 'pcs', store_id: 1, qty: 100 })).id;
+            }
+            await stock.updateStock(ids['Box Besar'], { price_per_unit: 2000 });
+            await stock.updateStock(ids['Garpu'], { price_per_unit: 300 });
+            await pack.replacePackagingRules(1, [
+                { stock_id: ids['Box Besar'], box_type: 'FULL', mode: 'per_box', qty: 1 },
+                { stock_id: ids['Box Kecil'], box_type: 'HALF', mode: 'per_box', qty: 1 },
+                { stock_id: ids['Garpu'], box_type: null, mode: 'per_box', qty: 1 },
+                { stock_id: ids['Plastik Kuning'], box_type: null, mode: 'per_boxes', qty: 1, boxes_per_unit: 2 },
+                { stock_id: ids['Sticker'], box_type: null, mode: 'per_order', qty: 1 },
+            ]);
+        });
+
+        it('order 2 FULL + 1 HALF deducts packaging; editing adjusts; cancelling returns everything', async () => {
+            const order = await orders.createOrder({ ...base, pesanan: [
+                { box_type: 'FULL', name: 'Dark Choco', qty: 2, variant_ids: [1] },
+                { box_type: 'HALF', name: 'Vanilla', qty: 1, variant_ids: [2] },
+            ] });
+            expect(await all()).toEqual({ 'Box Besar': 98, 'Box Kecil': 99, 'Garpu': 97, 'Plastik Kuning': 98, 'Sticker': 99 });
+            expect(await tepungQty()).toBe(4900); // ingredients still deducted alongside
+
+            await orders.updateOrder(order.id, { pesanan: [{ box_type: 'FULL', name: 'Dark Choco', qty: 1, variant_ids: [1] }] });
+            expect(await all()).toEqual({ 'Box Besar': 99, 'Box Kecil': 100, 'Garpu': 99, 'Plastik Kuning': 99, 'Sticker': 99 });
+
+            await orders.updateOrderStatus(order.id, 'CANCELLED');
+            expect(await all()).toEqual({ 'Box Besar': 100, 'Box Kecil': 100, 'Garpu': 100, 'Plastik Kuning': 100, 'Sticker': 100 });
+        });
+
+        it('packaging is deducted even when no flavor has a recipe', async () => {
+            await db.pool.query('DELETE FROM variant_recipe');
+            await orders.createOrder({ ...base, pesanan: [{ box_type: 'HALF', name: 'Vanilla', qty: 3, variant_ids: [2] }] });
+            expect(await all()).toEqual({ 'Box Besar': 100, 'Box Kecil': 97, 'Garpu': 97, 'Plastik Kuning': 98, 'Sticker': 99 });
+        });
+
+        it('HPP per box includes per-box packaging only (box + fork, not bag/sticker)', async () => {
+            const hpp = await recipe.getVariantHpp([1], 'FULL', 1);
+            // 50 g Tepung @ 140 = 7000; Box Besar 2000 + Garpu 300
+            expect(hpp.hpp_ingredients).toBe(7000);
+            expect(hpp.hpp_packaging).toBe(2300);
+            expect(hpp.hpp).toBe(9300);
+            expect(hpp.breakdown.filter(l => l.kind === 'packaging').map(l => l.item_name)).toEqual(['Box Besar', 'Garpu']);
+            expect((await recipe.getVariantHpp([1], 'HALF', 1)).breakdown.filter(l => l.kind === 'packaging').map(l => l.item_name)).toEqual(['Box Kecil', 'Garpu']);
+        });
+
+        it('guards: duplicate rule, bad N, delete while used; copy to another store', async () => {
+            await expect(pack.replacePackagingRules(1, [
+                { stock_id: ids['Garpu'], mode: 'per_box', qty: 1 },
+                { stock_id: ids['Garpu'], mode: 'per_box', qty: 2 },
+            ])).rejects.toMatchObject({ status: 400 });
+            await expect(pack.replacePackagingRules(1, [{ stock_id: ids['Plastik Kuning'], mode: 'per_boxes', qty: 1, boxes_per_unit: 1 }])).rejects.toMatchObject({ status: 400 });
+            await expect(stock.deleteStock(ids['Sticker'])).rejects.toMatchObject({ status: 409 });
+
+            const copied = await pack.copyPackagingRules(1, 2);
+            expect(copied.copied).toBe(5);
+            expect(copied.created_stock.sort()).toEqual(['Box Besar', 'Box Kecil', 'Garpu', 'Plastik Kuning', 'Sticker']);
+            const rules = await pack.getPackagingRules(2);
+            expect(rules.find(r => r.item_name === 'Plastik Kuning')).toMatchObject({ mode: 'per_boxes', boxes_per_unit: 2, unit: 'pcs', stock_qty: 0 });
+        });
+    });
 });

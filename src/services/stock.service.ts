@@ -110,6 +110,8 @@ export const deleteStock = async (id: number) => {
     }
     const base = await pool.query('SELECT 1 FROM base_recipe WHERE stock_id = $1 LIMIT 1', [id]);
     if (base.rowCount) throw new ConflictError('Bahan masih dipakai sebagai bahan dasar box. Hapus dari bahan dasar dulu.');
+    const packaging = await pool.query('SELECT 1 FROM packaging_rule WHERE stock_id = $1 LIMIT 1', [id]);
+    if (packaging.rowCount) throw new ConflictError('Barang masih dipakai sebagai kemasan. Hapus dari aturan kemasan dulu.');
     const { rowCount } = await pool.query('DELETE FROM stock WHERE id = $1', [id]);
     if (!rowCount) throw new NotFoundError(`Stock dengan id ${id} tidak ditemukan`);
     return true;

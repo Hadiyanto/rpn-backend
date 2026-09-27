@@ -297,3 +297,13 @@ T.Panir dan T.Sasa dipakai di setiap box apa pun rasanya, jadi tidak perlu dimas
 - Bahan yang dipakai sebagai bahan dasar tidak bisa dihapus (409) dan satuannya harus tetap gram.
 - UI: `/config` → **Varian & resep** → kartu **"Bahan dasar semua box"** di atas daftar rasa. Ada tombol salin ke store lain. Bahan dasar tidak muncul lagi di dropdown resep tiap rasa.
 - Test: **129 lulus**.
+
+## Kemasan & perlengkapan (2026-09-27) ✅
+Detail di `docs/plan-stok-kemasan.md`.
+- Tabel `packaging_rule` (migration `1789842088778`) berisi aturan pemakaian per store. Barangnya tetap di `stock` (satuan pcs).
+- Seed per store: Box Besar (1/Box Besar), Box Kecil (1/Box Kecil), Garpu (1/box), Plastik Kuning (1 per 2 box), Sticker (1/order), dengan stok 0 dan harga belum diisi.
+- Kemasan terpotong otomatis bersama bahan saat order (juga saat edit/batal). HPP box = bahan + kemasan per box (box + garpu). Plastik/sticker masuk biaya order.
+- UI: `/config` → Varian & resep → kartu **Kemasan & perlengkapan** (salin ke store lain + perkiraan biaya per order). Setup checklist punya langkah Kemasan.
+- Popup Stok: default **Stok Masuk**, kolom catatan dihapus. Resep rasa: **"Simpan juga ke"** store lain (otomatis tercentang kalau di sana belum ada resep atau resepnya sama).
+- Test: **139 lulus**.
+

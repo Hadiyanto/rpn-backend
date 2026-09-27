@@ -2,6 +2,7 @@ import type { PoolClient } from 'pg';
 import { pool, transaction } from '../config/db';
 import { ValidationError } from '../utils/validation';
 import { boxRule } from '../utils/boxRules';
+import { computePackagingUsage, loadPackagingRules, perBoxRules } from './packaging.service';
 
 type Queryable = Pick<PoolClient, 'query'>;
 
@@ -88,13 +89,18 @@ export const resolveBoxCost = async (
 export interface HppLine {
     stock_id: number;
     item_name: string;
+    /** Amount used, in the item's unit (grams for ingredients, pcs for packaging). */
     qty_gram: number;
+    kind?: 'ingredient' | 'packaging';
     price_per_unit: number | null;
     subtotal: number;
 }
 
 export interface HppResult {
     hpp: number;
+    /** Split of hpp: flavor + base ingredients vs per-box packaging. */
+    hpp_ingredients?: number;
+    hpp_packaging?: number;
     breakdown: HppLine[];
     /** Stock items used by the recipe that have no purchase price yet (counted as 0). */
     missing_price: number[];
@@ -123,16 +129,33 @@ export const computeHpp = (
     };
 };
 
+/**
+ * HPP of one box: ingredients (flavor recipes + base recipe) plus packaging used per box of this
+ * type (box, fork). Per-order packaging (bag, sticker) isn't part of a box's HPP; it lands in the
+ * order's stock_cost.
+ */
 export const getVariantHpp = async (variantIds: number[], boxType: string, storeId: number): Promise<HppResult> => {
     const usage = await resolveBoxCost(variantIds, boxType, storeId);
-    if (usage.length === 0) return { hpp: 0, breakdown: [], missing_price: [] };
+    const packaging = computePackagingUsage(perBoxRules(await loadPackagingRules(storeId), boxType), { [boxType]: 1 });
+    if (usage.length === 0 && packaging.length === 0) return { hpp: 0, hpp_ingredients: 0, hpp_packaging: 0, breakdown: [], missing_price: [] };
 
     const { rows } = await pool.query(
         'SELECT id, item_name, price_per_unit FROM stock WHERE id = ANY($1::int[])',
-        [usage.map(u => u.stock_id)]
+        [[...usage, ...packaging].map(u => u.stock_id)]
     );
     const stocks = new Map(rows.map(r => [r.id, { item_name: r.item_name, price_per_unit: r.price_per_unit === null ? null : Number(r.price_per_unit) }]));
-    return computeHpp(usage, stocks);
+    const ingredients = computeHpp(usage, stocks);
+    const pack = computeHpp(packaging, stocks);
+    return {
+        hpp: Math.round((ingredients.hpp + pack.hpp) * 100) / 100,
+        hpp_ingredients: ingredients.hpp,
+        hpp_packaging: pack.hpp,
+        breakdown: [
+            ...ingredients.breakdown.map(l => ({ ...l, kind: 'ingredient' as const })),
+            ...pack.breakdown.map(l => ({ ...l, kind: 'packaging' as const })),
+        ],
+        missing_price: [...new Set([...ingredients.missing_price, ...pack.missing_price])],
+    };
 };
 
 // ---------------------------------------------------------------------------
