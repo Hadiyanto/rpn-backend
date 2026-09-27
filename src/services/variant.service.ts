@@ -104,3 +104,24 @@ export const deleteVariant = async (id: number) => {
     if (!rowCount) throw new NotFoundError(`Variant dengan id ${id} tidak ditemukan`);
     return true;
 };
+
+/**
+ * Flavors ranked by boxes sold at a store over the last `days` days (cancelled orders excluded).
+ * Used to order the customer gallery and mark "Terlaris"; empty when nothing has sold yet.
+ */
+export const getBestSellers = async (storeId: number, days = 30) => {
+    if (!Number.isInteger(storeId) || storeId < 1) throw new ValidationError('store_id tidak valid');
+    const window = Number.isInteger(days) && days > 0 && days <= 365 ? days : 30;
+    const { rows } = await pool.query(`
+        SELECT oiv.variant_id, SUM(oi.qty)::int AS sold
+        FROM order_item_variants oiv
+        JOIN order_items oi ON oi.id = oiv.order_item_id
+        JOIN orders o ON o.id = oi.order_id
+        WHERE o.store_id = $1 AND o.status <> 'CANCELLED'
+          AND o.created_at >= CURRENT_TIMESTAMP - make_interval(days => $2)
+        GROUP BY oiv.variant_id
+        ORDER BY sold DESC, oiv.variant_id
+    `, [storeId, window]);
+    return rows as { variant_id: number; sold: number }[];
+};
+

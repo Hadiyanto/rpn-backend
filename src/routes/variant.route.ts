@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { sendError } from '../utils/errors';
-import { getVariants, createVariant, updateVariant, deleteVariant } from '../services/variant.service';
+import { getVariants, createVariant, updateVariant, deleteVariant, getBestSellers } from '../services/variant.service';
 import { redis } from '../config/redis';
 import { redisKeys } from '../utils/redisKeys';
 
@@ -27,6 +27,16 @@ router.get('/variants', async (req, res) => {
         }
 
         res.json({ status: 'ok', data });
+    } catch (e: any) {
+        sendError(res, e);
+    }
+});
+
+// GET /variants/best-sellers?store_id=1[&days=30] → [{ variant_id, sold }] (most sold first)
+router.get('/variants/best-sellers', async (req, res) => {
+    try {
+        const days = req.query.days ? Number(req.query.days) : undefined;
+        res.json({ status: 'ok', data: await getBestSellers(Number(req.query.store_id), days) });
     } catch (e: any) {
         sendError(res, e);
     }

@@ -221,4 +221,15 @@ describe.skipIf(!hasTestDb)('orders with variant_ids (local Postgres + fake Redi
             await db.pool.query('TRUNCATE stock RESTART IDENTITY CASCADE');
         });
     });
+
+    it('best sellers: boxes sold per flavor at the store, cancelled orders excluded', async () => {
+        const { getBestSellers } = await import('../variant.service');
+        expect(await getBestSellers(1)).toEqual([]);
+        await orders.createOrder({ ...base, pesanan: [{ box_type: 'FULL', name: 'Mix', qty: 2, variant_ids: [1, 3] }] });
+        await orders.createOrder({ ...base, pesanan: [{ box_type: 'FULL', name: 'Keju', qty: 1, variant_ids: [3] }] });
+        const cancelled = await orders.createOrder({ ...base, pesanan: [{ box_type: 'FULL', name: 'Vanilla', qty: 5, variant_ids: [2] }] });
+        await orders.updateOrderStatus(cancelled.id, 'CANCELLED');
+        expect(await getBestSellers(1)).toEqual([{ variant_id: 3, sold: 3 }, { variant_id: 1, sold: 2 }]);
+        expect(await getBestSellers(2)).toEqual([]);
+    });
 });
