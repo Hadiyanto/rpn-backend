@@ -24,6 +24,8 @@ describe.skipIf(!hasTestDb)('stock & recipe services (local Postgres)', () => {
         await db.pool.query('TRUNCATE variant_recipe, stock_history, stock, variant, menu RESTART IDENTITY CASCADE');
         await db.pool.query(`INSERT INTO menu (name, price, box_multiplier, max_flavors) VALUES ('FULL', 65000, 1, 3), ('HALF', 35000, 0.5, 1)`);
         await db.pool.query(`INSERT INTO variant (variant_name) VALUES ('Dark Choco'), ('Vanilla'), ('Keju')`);
+        // Selling prices: Box Besar 65.000 / Box Kecil 35.000 for every flavor at every store.
+        await db.pool.query(`INSERT INTO variant_price (variant_id, store_id, price_full, price_half) SELECT v.id, s.id, 65000, 35000 FROM variant v CROSS JOIN stores s`);
     });
 
     it('createStock + adjustStock (delta and physical count) keep history consistent', async () => {

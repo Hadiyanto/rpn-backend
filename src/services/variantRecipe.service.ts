@@ -4,6 +4,7 @@ import { ValidationError } from '../utils/validation';
 import { boxRule } from '../utils/boxRules';
 import { computePackagingUsage, loadPackagingRules, perBoxRules } from './packaging.service';
 import { getLaborCost } from './salary.service';
+import { copyVariantPrices } from './variantPrice.service';
 
 type Queryable = Pick<PoolClient, 'query'>;
 
@@ -400,12 +401,17 @@ export const copyVariantRecipes = async (fromStoreId: number, toStoreId: number,
             );
         }
 
-        // Optionally start selling the copied flavors at the target store right away.
+        // Selling prices go with the recipe.
+        await copyVariantPrices(client, fromStoreId, toStoreId, copiedVariants);
+
+        // Optionally start selling the copied flavors at the target store right away
+        // (only those that have a price there; a flavor without a price can't be sold).
         if (makeAvailable) {
-            await client.query(
-                'UPDATE variant SET store_ids = array_append(store_ids, $2) WHERE id = ANY($1::int[]) AND NOT ($2 = ANY(store_ids))',
-                [copiedVariants, toStoreId]
-            );
+            await client.query(`
+                UPDATE variant SET store_ids = array_append(store_ids, $2)
+                WHERE id = ANY($1::int[]) AND NOT ($2 = ANY(store_ids))
+                  AND EXISTS (SELECT 1 FROM variant_price vp WHERE vp.variant_id = variant.id AND vp.store_id = $2)
+            `, [copiedVariants, toStoreId]);
         }
 
         return { copied_variants: copiedVariants.length, created_stock: created };

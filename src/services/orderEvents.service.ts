@@ -19,6 +19,7 @@ interface OrderItemLike {
     box_type: string;
     name: string;
     qty: number;
+    unit_price?: number | null;
 }
 
 const sendWA = async (phone: string | null | undefined, message: string, label: string) => {
@@ -40,12 +41,13 @@ export const onOrderCreated = (order: { id: number; public_token?: string; custo
         }).catch(console.error);
 
         const prices = await getMenuPriceMap();
+        const boxPrice = (p: OrderItemLike) => (p.unit_price ?? null) !== null ? Number(p.unit_price) : prices.get(p.box_type) || 0;
         await sendWA(order.customer_phone, buildNewOrderMessage({
             customer_name: order.customer_name,
             order_id: order.id,
             order_details: order.items.map(p => `- ${p.qty}x ${boxLabel(p.box_type)} (${p.name})`).join('\n'),
             total_box: order.items.reduce((sum, p) => sum + p.qty, 0),
-            total_amount: order.items.reduce((sum, p) => sum + p.qty * (prices.get(p.box_type) || 0), 0).toLocaleString('id-ID'),
+            total_amount: order.items.reduce((sum, p) => sum + p.qty * boxPrice(p), 0).toLocaleString('id-ID'),
             // Link by public_token (not the sequential id) so other customers' orders can't be guessed.
             upload_link: `${process.env.FRONTEND_URL || 'http://localhost:3001'}/bukti-transfer/${order.public_token ?? order.id}`,
         }), 'NEW');

@@ -182,7 +182,7 @@ describe.skipIf(!hasTestDb)('services on pg (shape parity & behaviour)', () => {
         const orders = await import('../order.service');
         const all = await orders.getOrders();
         expect(all.map((o: any) => o.id)).toEqual([1, 2]);
-        expect(all[0].items).toEqual([{ id: 1, box_type: 'FULL', name: 'x', qty: 2, variant_ids: [] }]);
+        expect(all[0].items).toEqual([{ id: 1, box_type: 'FULL', name: 'x', qty: 2, unit_price: null, price_variant_id: null, variant_ids: [] }]);
         expect(all[1].items).toEqual([]);
         expect((await orders.getOrders({ status: 'paid' })).map((o: any) => o.id)).toEqual([1]);
         expect((await orders.getOrders({ store_id: 2 })).map((o: any) => o.id)).toEqual([2]);

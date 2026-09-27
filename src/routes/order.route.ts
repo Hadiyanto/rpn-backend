@@ -4,8 +4,20 @@ import rateLimit from 'express-rate-limit';
 import { createOrder, getOrders, getOrderById, changeOrderStatus, updatePaymentMethod, updateOrder, updateTransferImgUrl, getPublicOrder, getOrderIdByPublicToken, assertTransferImgUrl } from '../services/order.service';
 import { onOrderCreated, onOrderStatusChanged, onTransferUploaded } from '../services/orderEvents.service';
 import { recalculateOrderStock } from '../services/stockDeduction.service';
+import { quoteOrder } from '../services/variantPrice.service';
 
 const router = Router();
+
+// POST /orders/quote  { store_id, pesanan } → price per box (most expensive flavor) + total.
+// Registered before /orders/:id routes; the order form shows exactly what createOrder will charge.
+router.post('/orders/quote', async (req, res) => {
+    try {
+        const { store_id, pesanan } = req.body ?? {};
+        res.json({ status: 'ok', data: await quoteOrder(store_id, pesanan) });
+    } catch (e: any) {
+        sendError(res, e);
+    }
+});
 
 // Rate limiter specifically for creating guest orders (anti-spam / quota lock)
 const orderLimiter = rateLimit({

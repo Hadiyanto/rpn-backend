@@ -9,11 +9,17 @@ export interface VariantInput {
     store_ids?: number[];
 }
 
-/** All flavors, each with `recipe_store_ids`: the stores that have a recipe for it. */
+/**
+ * All flavors, each with `recipe_store_ids` (stores that have its recipe), `price_store_ids`
+ * (stores that have a selling price) and `prices` ({ [store_id]: { price_full, price_half } }).
+ */
 export const getVariants = async () => {
     const { rows } = await pool.query(`
         SELECT v.*,
-               COALESCE((SELECT array_agg(DISTINCT vr.store_id ORDER BY vr.store_id) FROM variant_recipe vr WHERE vr.variant_id = v.id), '{}') AS recipe_store_ids
+               COALESCE((SELECT array_agg(DISTINCT vr.store_id ORDER BY vr.store_id) FROM variant_recipe vr WHERE vr.variant_id = v.id), '{}') AS recipe_store_ids,
+               COALESCE((SELECT array_agg(vp.store_id ORDER BY vp.store_id) FROM variant_price vp WHERE vp.variant_id = v.id), '{}') AS price_store_ids,
+               COALESCE((SELECT json_object_agg(vp.store_id, json_build_object('price_full', vp.price_full, 'price_half', vp.price_half))
+                         FROM variant_price vp WHERE vp.variant_id = v.id), '{}') AS prices
         FROM variant v
         ORDER BY v.is_active DESC, v.id
     `);
@@ -22,19 +28,25 @@ export const getVariants = async () => {
 
 /**
  * A flavor can only be sold at a store that has its recipe (otherwise its stock can't be
- * deducted). Throws 409 naming the stores that still need a recipe.
+ * deducted) and a selling price. Throws 409 naming what each store still needs.
  */
-const assertStoresHaveRecipe = async (variantId: number | null, storeIds: number[]) => {
+const assertStoresCanSell = async (variantId: number | null, storeIds: number[]) => {
     if (storeIds.length === 0) return;
     const { rows } = await pool.query(`
-        SELECT s.id, s.name
+        SELECT s.name,
+               EXISTS (SELECT 1 FROM variant_recipe vr WHERE vr.store_id = s.id AND vr.variant_id = $2) AS has_recipe,
+               EXISTS (SELECT 1 FROM variant_price vp WHERE vp.store_id = s.id AND vp.variant_id = $2) AS has_price
         FROM stores s
         WHERE s.id = ANY($1::int[])
-          AND NOT EXISTS (SELECT 1 FROM variant_recipe vr WHERE vr.store_id = s.id AND vr.variant_id = $2)
         ORDER BY s.id
     `, [storeIds, variantId ?? 0]);
-    if (rows.length > 0) {
-        throw new ConflictError(`Belum ada resep rasa ini di ${rows.map(r => r.name).join(', ')}. Buat atau salin resepnya dulu.`);
+    const noRecipe = rows.filter(r => !r.has_recipe).map(r => r.name);
+    if (noRecipe.length > 0) {
+        throw new ConflictError(`Belum ada resep rasa ini di ${noRecipe.join(', ')}. Buat atau salin resepnya dulu.`);
+    }
+    const noPrice = rows.filter(r => !r.has_price).map(r => r.name);
+    if (noPrice.length > 0) {
+        throw new ConflictError(`Belum ada harga jual rasa ini di ${noPrice.join(', ')}. Isi harganya dulu.`);
     }
 };
 
@@ -67,13 +79,13 @@ const validateVariantFields = async (input: VariantInput, excludeId?: number) =>
 export const createVariant = async (input: VariantInput) => {
     if (input.variant_name === undefined) throw new ValidationError('Nama rasa wajib diisi');
     const fields = await validateVariantFields(input);
-    await assertStoresHaveRecipe(null, (fields.store_ids as number[] | undefined) ?? []);
+    await assertStoresCanSell(null, (fields.store_ids as number[] | undefined) ?? []);
     return insertRow('variant', { is_active: true, store_ids: [], ...fields });
 };
 
 export const updateVariant = async (id: number, updates: VariantInput) => {
     const fields = await validateVariantFields(updates, id);
-    if (fields.store_ids) await assertStoresHaveRecipe(id, fields.store_ids as number[]);
+    if (fields.store_ids) await assertStoresCanSell(id, fields.store_ids as number[]);
     const data = await updateRowById('variant', id, fields);
     if (!data) throw new NotFoundError(`Variant dengan id ${id} tidak ditemukan`);
     return data;

@@ -102,6 +102,8 @@ export const createBiteshipDispatch = async (order: any): Promise<DispatchResult
                 name: `${boxLabel(item.box_type)} - ${item.name}`,
                 description: `RPN ${item.box_type}`,
                 ...boxShippingItem(boxes.get(item.box_type), item.box_type),
+                // Declared value = the box price actually charged.
+                ...(item.unit_price != null ? { value: Number(item.unit_price) } : {}),
                 quantity: item.qty,
             })),
             order_note: `RPN Order #${order.id}${order.note ? ` - ${order.note}` : ''}`,

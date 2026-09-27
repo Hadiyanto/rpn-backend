@@ -22,6 +22,7 @@ import storeRoute from './store.route';
 import variantRecipeRoute from './variantRecipe.route';
 import setupRoute from './setup.route';
 import packagingRoute from './packaging.route';
+import variantPriceRoute from './variantPrice.route';
 
 const router = Router();
 
@@ -47,6 +48,7 @@ router.use(storeRoute);
 router.use(variantRecipeRoute);
 router.use(setupRoute);
 router.use(packagingRoute);
+router.use(variantPriceRoute);
 
 export default router;
 

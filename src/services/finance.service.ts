@@ -10,7 +10,7 @@ export const getWeeklySummary = async (start: string, end: string, storeId?: num
     const store = storeId ?? null;
     // 1. Items of DONE orders in range, grouped per box type
     const { rows: itemRows } = await pool.query(`
-        SELECT oi.box_type, SUM(oi.qty)::int AS qty
+        SELECT oi.box_type, SUM(oi.qty)::int AS qty, SUM(oi.qty * oi.unit_price) AS revenue
         FROM orders o
         JOIN order_items oi ON oi.order_id = o.id
         WHERE o.status = 'DONE'
@@ -27,7 +27,8 @@ export const getWeeklySummary = async (start: string, end: string, storeId?: num
     let totalRevenue = 0;
     let totalBoxes = 0;
     for (const row of itemRows) {
-        totalRevenue += row.qty * (prices.get(row.box_type) ?? 0);
+        // unit_price is snapshotted per box; the menu price only covers rows from before that existed.
+        totalRevenue += row.revenue ?? row.qty * (prices.get(row.box_type) ?? 0);
         totalBoxes += row.qty;
     }
 

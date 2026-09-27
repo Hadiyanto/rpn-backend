@@ -30,6 +30,8 @@ describe.skipIf(!hasTestDb)('orders with variant_ids (local Postgres + fake Redi
         await db.pool.query('TRUNCATE orders, order_items, order_item_variants, daily_quota, hourly_quota, variant, menu RESTART IDENTITY CASCADE');
         await db.pool.query(`INSERT INTO menu (name, price, box_multiplier, max_flavors) VALUES ('FULL', 65000, 1, 3), ('HALF', 35000, 0.5, 1)`);
         await db.pool.query(`INSERT INTO variant (variant_name) VALUES ('Dark Choco'), ('Vanilla'), ('Keju')`);
+        // Selling prices: Box Besar 65.000 / Box Kecil 35.000 for every flavor at every store.
+        await db.pool.query(`INSERT INTO variant_price (variant_id, store_id, price_full, price_half) SELECT v.id, s.id, 65000, 35000 FROM variant v CROSS JOIN stores s`);
         await db.pool.query(`INSERT INTO daily_quota (date, qty, store_id) VALUES ($1, 10, 1)`, [DATE]);
     });
 
@@ -143,5 +145,80 @@ describe.skipIf(!hasTestDb)('orders with variant_ids (local Postgres + fake Redi
         const unchanged = await orders.getOrderById(created.id);
         expect(unchanged.customer_name).toBe('Budi Baru');
         expect(unchanged.items[0].variant_ids).toEqual([1, 2]);
+    });
+
+    describe('harga jual per rasa per store', () => {
+        const setPrice = async (variantId: number, storeId: number, full: number | null, half: number | null) => {
+            const { setVariantPrice } = await import('../variantPrice.service');
+            await setVariantPrice(variantId, storeId, { price_full: full, price_half: half });
+        };
+
+        it('box price = most expensive flavor; snapshotted; edit reprices; totals everywhere use it', async () => {
+            await setPrice(1, 1, 60000, 32500); // Dark Choco
+            await setPrice(3, 1, 68000, 37000); // Keju
+            const created = await orders.createOrder({ ...base, pesanan: [
+                { box_type: 'FULL', name: 'Mix', qty: 2, variant_ids: [1, 3] },
+                { box_type: 'HALF', name: 'Dark Choco', qty: 1, variant_ids: [1] },
+            ] });
+            expect(created.items.map((i: any) => [i.unit_price, i.price_variant_id])).toEqual([[68000, 3], [32500, 1]]);
+            const fetched = await orders.getOrderById(created.id);
+            expect(fetched.items.map((i: any) => i.unit_price)).toEqual([68000, 32500]);
+            expect(fetched.total_amount).toBe(2 * 68000 + 32500);
+
+            // A later price change doesn't touch the existing order…
+            await setPrice(3, 1, 70000, 37000);
+            expect((await orders.getOrderById(created.id)).total_amount).toBe(168500);
+            // …but editing it prices the items again.
+            await orders.updateOrder(created.id, { pesanan: [{ box_type: 'FULL', name: 'Mix', qty: 1, variant_ids: [1, 3] }] });
+            expect((await orders.getOrderById(created.id)).total_amount).toBe(70000);
+
+            // Revenue in the finance summary comes from the snapshotted price.
+            await orders.updateOrderStatus(created.id, 'DONE');
+            const { getWeeklySummary } = await import('../finance.service');
+            expect((await getWeeklySummary(DATE, DATE, 1)).totalRevenue).toBe(70000);
+
+            // Public page shows the prices too.
+            const pub = await orders.getPublicOrder(fetched.public_token);
+            expect(pub).toMatchObject({ total_amount: 70000, items: [{ unit_price: 70000 }] });
+        });
+
+        it('a flavor without a price (for that box type) at the store cannot be ordered; quote = createOrder', async () => {
+            await setPrice(2, 1, 60000, null); // Vanilla: Box Besar only
+            await expect(orders.createOrder({ ...base, pesanan: [{ box_type: 'HALF', name: 'Vanilla', qty: 1, variant_ids: [2] }] }))
+                .rejects.toThrow(/Vanilla belum ada harga Box Kecil/);
+            await db.pool.query('DELETE FROM variant_price WHERE variant_id = 3 AND store_id = 1');
+            await expect(orders.createOrder({ ...base, pesanan: [{ box_type: 'FULL', name: 'Keju', qty: 1, variant_ids: [3] }] }))
+                .rejects.toThrow(/Keju belum ada harga Box Besar/);
+            // Nothing was reserved by the rejected orders.
+            expect(Number(await fakeRedis.get(redisKeys.dailyQuota(1, DATE)) ?? 10)).toBe(10);
+
+            const { quoteOrder } = await import('../variantPrice.service');
+            expect(await quoteOrder(1, [{ box_type: 'FULL', name: 'Mix', qty: 3, variant_ids: [1, 2] }]))
+                .toMatchObject({ total_amount: 195000, items: [{ unit_price: 65000, subtotal: 195000 }] });
+        });
+
+        it('selling needs recipe + price; clearing the prices stops selling; copying a recipe copies its price', async () => {
+            const variant = await import('../variant.service');
+            const stock = await import('../stock.service');
+            const recipe = await import('../variantRecipe.service');
+            await db.pool.query('DELETE FROM variant_price');
+            const coklat = await stock.createStock({ item_name: 'Cokelat Price', unit: 'gram', store_id: 1 });
+            await recipe.replaceVariantRecipe(1, 1, [{ stock_id: coklat.id, qty_gram: 100 }]);
+            await expect(variant.updateVariant(1, { store_ids: [1] })).rejects.toThrow(/Belum ada harga jual rasa ini/);
+
+            await setPrice(1, 1, 60000, 32500);
+            expect((await variant.updateVariant(1, { store_ids: [1] })).store_ids).toEqual([1]);
+            const listed = (await variant.getVariants()).find(v => v.id === 1);
+            expect(listed).toMatchObject({ price_store_ids: [1], prices: { 1: { price_full: 60000, price_half: 32500 } } });
+
+            await recipe.copyVariantRecipes(1, 2, [1], true);
+            const { getVariantPrices } = await import('../variantPrice.service');
+            expect(await getVariantPrices(2)).toEqual([{ variant_id: 1, variant_name: undefined, price_full: 60000, price_half: 32500 }]);
+            expect((await variant.getVariants()).find(v => v.id === 1)?.store_ids).toEqual([1, 2]);
+
+            await setPrice(1, 2, null, null);
+            expect((await variant.getVariants()).find(v => v.id === 1)?.store_ids).toEqual([1]);
+            await db.pool.query('TRUNCATE stock RESTART IDENTITY CASCADE');
+        });
     });
 });

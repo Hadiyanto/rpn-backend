@@ -23,6 +23,7 @@ export const getSetupStatus = async (storeId: number): Promise<SetupStep[]> => {
         pool.query(`
             SELECT v.id, v.variant_name,
                    EXISTS (SELECT 1 FROM variant_recipe vr WHERE vr.variant_id = v.id AND vr.store_id = $1) AS has_recipe,
+                   EXISTS (SELECT 1 FROM variant_price vp WHERE vp.variant_id = v.id AND vp.store_id = $1) AS has_price,
                    $1 = ANY(v.store_ids) AS is_sold
             FROM variant v
             WHERE v.is_active IS NOT FALSE
@@ -52,6 +53,8 @@ export const getSetupStatus = async (storeId: number): Promise<SetupStep[]> => {
     const activeVariants = variants.rows;
     const withoutRecipe = activeVariants.filter(v => !v.has_recipe);
     const sold = activeVariants.filter(v => v.is_sold);
+    const withoutPrice = activeVariants.filter(v => !v.has_price);
+    const sellable = activeVariants.filter(v => v.has_recipe && v.has_price);
     const s = stocks.rows[0];
     const st = store.rows[0] ?? {};
     // Every active box type needs its own box item (a per_box rule for exactly that type).
@@ -106,10 +109,19 @@ export const getSetupStatus = async (storeId: number): Promise<SetupStep[]> => {
             href: '/config?tab=varian',
         },
         {
+            key: 'prices',
+            title: 'Harga jual tiap rasa',
+            state: state(activeVariants.length > 0 && withoutPrice.length === 0, activeVariants.length > withoutPrice.length),
+            detail: withoutPrice.length === 0
+                ? (activeVariants.length ? 'Semua rasa punya harga' : 'Belum ada rasa')
+                : `Belum ada harga: ${withoutPrice.slice(0, 5).map(v => v.variant_name).join(', ')}${withoutPrice.length > 5 ? ` +${withoutPrice.length - 5}` : ''}`,
+            href: '/config?tab=varian',
+        },
+        {
             key: 'availability',
             title: 'Rasa yang dijual di store ini',
-            state: state(sold.length > 0 && sold.length === activeVariants.length - withoutRecipe.length, sold.length > 0),
-            detail: `${sold.length} dari ${activeVariants.length} rasa dijual${withoutRecipe.length ? ` (${withoutRecipe.length} belum punya resep di store ini)` : ''}`,
+            state: state(sold.length > 0 && sold.length === sellable.length, sold.length > 0),
+            detail: `${sold.length} dari ${activeVariants.length} rasa dijual${activeVariants.length - sellable.length ? ` (${activeVariants.length - sellable.length} belum punya resep atau harga di store ini)` : ''}`,
             href: '/config?tab=tersedia',
         },
         {

@@ -21,7 +21,7 @@ export const redisKeys = {
     dailyQuota: (storeId: number, date: string) => `${REDIS_NAMESPACE}:quota:daily:${storeId}:${date}`,
     hourlyQuota: (storeId: number, date: string, time: string) => `${REDIS_NAMESPACE}:quota:hourly:${storeId}:${date}:${hourOf(time)}`,
     menuCache: `${REDIS_NAMESPACE}:cache:menu:v1`,
-    variantsCache: `${REDIS_NAMESPACE}:cache:variants:v1`,
+    variantsCache: `${REDIS_NAMESPACE}:cache:variants:v2`,
     /** Prefix for one WhatsApp session's auth keys ("rpn:wa:main" → "rpn:wa:main:creds", …). */
     waSession: (session: string) => `${REDIS_NAMESPACE}:wa:${session}`,
 };

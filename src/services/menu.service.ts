@@ -52,7 +52,9 @@ export const buildShippingItems = async (boxes: unknown) => {
     .map((b: any) => {
       const boxType = String(b.box_type);
       const label = boxType === 'FULL' ? 'Full Box' : boxType === 'HALF' ? 'Half Box' : boxType;
-      return { name: label, description: `RPN ${boxType}`, ...boxShippingItem(menus.get(boxType), boxType), quantity: Number(b.qty) };
+      const item = { name: label, description: `RPN ${boxType}`, ...boxShippingItem(menus.get(boxType), boxType), quantity: Number(b.qty) };
+      // The order form may pass the box price it shows (flavor prices); otherwise the menu price.
+      return Number(b.value) > 0 ? { ...item, value: Number(b.value) } : item;
     });
 };
 

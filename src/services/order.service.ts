@@ -8,6 +8,7 @@ import { ensureDailyQuotaKey, syncDailyRedisQuota } from './dailyQuota.service';
 import { syncHourlyRedisQuota } from './hourlyQuota.service';
 import { checkVariantSelection, loadVariantCatalog } from './variantRecipe.service';
 import { applyOrderStockSafe, reverseOrderStockSafe } from './stockDeduction.service';
+import { priceOrderItems } from './variantPrice.service';
 import type { PoolClient } from 'pg';
 import {
     ValidationError,
@@ -76,12 +77,20 @@ const assertBoxesAvailable = async (storeId: number, items: ValidOrderItem[]) =>
     }
 };
 
+export type PricedOrderItem = ValidOrderItem & { unit_price: number; price_variant_id: number | null };
+
+/** Prices each item at the store (most expensive flavor; validates that every flavor has a price). */
+const priceItems = async (storeId: number, items: ValidOrderItem[]): Promise<PricedOrderItem[]> => {
+    const prices = await priceOrderItems(storeId, items);
+    return items.map((item, i) => ({ ...item, ...prices[i] }));
+};
+
 /** Inserts order_items (+ their order_item_variants) for an order inside an open transaction. */
-const insertOrderItems = async (client: PoolClient, orderId: number, items: ValidOrderItem[]) => {
+const insertOrderItems = async (client: PoolClient, orderId: number, items: PricedOrderItem[]) => {
     for (const item of items) {
         const { rows: [row] } = await client.query(
-            'INSERT INTO order_items (order_id, box_type, name, qty) VALUES ($1, $2, $3, $4) RETURNING id',
-            [orderId, item.box_type, item.name, item.qty]
+            'INSERT INTO order_items (order_id, box_type, name, qty, unit_price, price_variant_id) VALUES ($1, $2, $3, $4, $5, $6) RETURNING id',
+            [orderId, item.box_type, item.name, item.qty, item.unit_price, item.price_variant_id]
         );
         for (const variantId of item.variant_ids ?? []) {
             await client.query(
@@ -120,12 +129,14 @@ export const createOrder = async (payload: CreateOrderPayload) => {
     const store_id = validateStoreId(payload.store_id);
     const customer_name = validateCustomerName(payload.customer_name);
     const customer_phone = validatePhone(payload.customer_phone);
-    const pesanan = validateOrderItems(payload.pesanan);
+    const validItems = validateOrderItems(payload.pesanan);
     const pickup_date = validatePickupDate(payload.pickup_date);
     const pickup_time = validatePickupTime(payload.pickup_time);
     const note = validateNote(payload.note);
-    await assertBoxesAvailable(store_id, pesanan);
-    await assertVariantSelections(pesanan);
+    await assertBoxesAvailable(store_id, validItems);
+    await assertVariantSelections(validItems);
+    // Prices come from the store's flavor prices, never from the client.
+    const pesanan = await priceItems(store_id, validItems);
 
     const requestedBoxQty = boxUnits(pesanan);
 
@@ -265,10 +276,13 @@ const ORDER_WITH_ITEMS_COLUMNS = `
     -- Raw-material cost booked for this order (fixed at deduction time; NULL = nothing priced).
     (SELECT SUM(-sh.qty_change * sh.unit_cost) FROM stock_history sh WHERE sh.order_id = o.id) AS stock_cost,
     COALESCE(
-        json_agg(json_build_object('id', oi.id, 'box_type', oi.box_type, 'name', oi.name, 'qty', oi.qty) ORDER BY oi.id)
+        json_agg(json_build_object('id', oi.id, 'box_type', oi.box_type, 'name', oi.name, 'qty', oi.qty,
+                                   'unit_price', oi.unit_price, 'price_variant_id', oi.price_variant_id) ORDER BY oi.id)
             FILTER (WHERE oi.id IS NOT NULL),
         '[]'
-    ) AS items`;
+    ) AS items,
+    -- Box prices are snapshotted on the items when the order is created or edited.
+    COALESCE(SUM(oi.qty * oi.unit_price), 0) AS total_amount`;
 
 export const getOrders = async (filters?: GetOrdersFilter) => {
     const where: string[] = [];
@@ -373,7 +387,7 @@ export const updateOrder = async (id: number, payload: UpdateOrderPayload) => {
     // Admin edits may keep an order's existing (possibly past) date, but a changed
     // date must follow the same rules as a new order.
     const customer_name = payload.customer_name === undefined ? undefined : validateCustomerName(payload.customer_name);
-    const pesanan = payload.pesanan && payload.pesanan.length > 0 ? validateOrderItems(payload.pesanan) : undefined;
+    const validItems = payload.pesanan && payload.pesanan.length > 0 ? validateOrderItems(payload.pesanan) : undefined;
     const pickup_date = payload.pickup_date === undefined
         ? undefined
         : validatePickupDate(payload.pickup_date, { allowPast: payload.pickup_date === oldOrder?.pickup_date });
@@ -381,9 +395,12 @@ export const updateOrder = async (id: number, payload: UpdateOrderPayload) => {
         ? payload.pickup_time
         : (validatePickupTime(payload.pickup_time) ?? null);
     const note = validateNote(payload.note);
-    if (pesanan) {
-        await assertBoxesAvailable(oldOrder.store_id, pesanan);
-        await assertVariantSelections(pesanan);
+    let pesanan: PricedOrderItem[] | undefined;
+    if (validItems) {
+        await assertBoxesAvailable(oldOrder.store_id, validItems);
+        await assertVariantSelections(validItems);
+        // Edited items are priced again at today's prices.
+        pesanan = await priceItems(oldOrder.store_id, validItems);
     }
 
     // 1+2. Header update and item replacement in ONE transaction, so a failed item insert
@@ -460,7 +477,10 @@ export const getPublicOrder = async (token: string) => {
         payment_method: order.payment_method,
         store_id: order.store_id,
         has_transfer_img: !!order.transfer_img_url,
-        items: order.items.map((i: { box_type: string; name: string; qty: number }) => ({ box_type: i.box_type, name: i.name, qty: i.qty })),
+        total_amount: Number(order.total_amount),
+        items: order.items.map((i: { box_type: string; name: string; qty: number; unit_price: number | null }) => ({
+            box_type: i.box_type, name: i.name, qty: i.qty, unit_price: i.unit_price === null ? null : Number(i.unit_price),
+        })),
     };
 };
 

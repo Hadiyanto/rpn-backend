@@ -316,3 +316,12 @@ Detail di `docs/plan-gaji.md`. Migration `1789842089778`.
 - UI: `/config/salary` (gaji pokok + bonus + simulasi + salin), `/salary` (per store, rincian), tab Store (acuan HPP), `/summary` dan `/cashflow` per store. Kategori "Gaji" dihapus dari input manual.
 - Test: **144 lulus**.
 
+## Harga jual per rasa per store (2026-09-27) ✅
+Detail di `docs/plan-harga-per-rasa.md`. Migration `1789842090778`.
+- Tabel `variant_price (variant_id, store_id, price_full, price_half)`, seed dari nama rasa: Basic 60.000/32.500, Oreo 65.000/35.000, Keju/Special 68.000/37.000.
+- Harga box = **rasa termahal** (`computeBoxPrice`). Harga kosong untuk jenis box → rasa tidak bisa dipilih untuk box itu. Tanpa harga sama sekali → tidak bisa dijual (Ketersediaan terkunci).
+- `order_items.unit_price` + `price_variant_id` (snapshot; edit order = hitung ulang). `total_amount` di query order. `POST /orders/quote`.
+- Semua total memakai `unit_price`: finance, WA, Biteship, form order, orders, cashflow, finance, bukti transfer. `useMenuPrices` dihapus. Harga di tab Menu box diganti keterangan.
+- Salin resep / "Simpan juga ke" ikut menyalin harga. Setup checklist: langkah "Harga jual tiap rasa". Cache varian `rpn:cache:variants:v2`.
+- Test: **150 lulus**.
+
