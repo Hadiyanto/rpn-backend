@@ -3,6 +3,7 @@ import { pool, transaction } from '../config/db';
 import { ValidationError } from '../utils/validation';
 import { boxRule } from '../utils/boxRules';
 import { computePackagingUsage, loadPackagingRules, perBoxRules } from './packaging.service';
+import { getLaborCost } from './salary.service';
 
 type Queryable = Pick<PoolClient, 'query'>;
 
@@ -101,6 +102,9 @@ export interface HppResult {
     /** Split of hpp: flavor + base ingredients vs per-box packaging. */
     hpp_ingredients?: number;
     hpp_packaging?: number;
+    /** Estimated salary per box (see salary.service getLaborCost); scaled by box_multiplier. */
+    hpp_labor?: number;
+    labor?: { per_full_box: number; target_boxes: number; reference_store_id: number; reference_store_name: string | null } | null;
     breakdown: HppLine[];
     /** Stock items used by the recipe that have no purchase price yet (counted as 0). */
     missing_price: number[];
@@ -137,7 +141,12 @@ export const computeHpp = (
 export const getVariantHpp = async (variantIds: number[], boxType: string, storeId: number): Promise<HppResult> => {
     const usage = await resolveBoxCost(variantIds, boxType, storeId);
     const packaging = computePackagingUsage(perBoxRules(await loadPackagingRules(storeId), boxType), { [boxType]: 1 });
-    if (usage.length === 0 && packaging.length === 0) return { hpp: 0, hpp_ingredients: 0, hpp_packaging: 0, breakdown: [], missing_price: [] };
+    const labor = await getLaborCost(storeId);
+    const hppLabor = labor ? Math.round(labor.per_box * (await getBoxMultiplier(pool, boxType)) * 100) / 100 : 0;
+    const laborInfo = labor ? { per_full_box: labor.per_box, target_boxes: labor.target_boxes, reference_store_id: labor.reference_store_id, reference_store_name: labor.reference_store_name } : null;
+    if (usage.length === 0 && packaging.length === 0) {
+        return { hpp: hppLabor, hpp_ingredients: 0, hpp_packaging: 0, hpp_labor: hppLabor, labor: laborInfo, breakdown: [], missing_price: [] };
+    }
 
     const { rows } = await pool.query(
         'SELECT id, item_name, price_per_unit FROM stock WHERE id = ANY($1::int[])',
@@ -147,9 +156,11 @@ export const getVariantHpp = async (variantIds: number[], boxType: string, store
     const ingredients = computeHpp(usage, stocks);
     const pack = computeHpp(packaging, stocks);
     return {
-        hpp: Math.round((ingredients.hpp + pack.hpp) * 100) / 100,
+        hpp: Math.round((ingredients.hpp + pack.hpp + hppLabor) * 100) / 100,
         hpp_ingredients: ingredients.hpp,
         hpp_packaging: pack.hpp,
+        hpp_labor: hppLabor,
+        labor: laborInfo,
         breakdown: [
             ...ingredients.breakdown.map(l => ({ ...l, kind: 'ingredient' as const })),
             ...pack.breakdown.map(l => ({ ...l, kind: 'packaging' as const })),

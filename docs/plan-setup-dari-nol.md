@@ -307,3 +307,12 @@ Detail di `docs/plan-stok-kemasan.md`.
 - Popup Stok: default **Stok Masuk**, kolom catatan dihapus. Resep rasa: **"Simpan juga ke"** store lain (otomatis tercentang kalau di sana belum ada resep atau resepnya sama).
 - Test: **139 lulus**.
 
+## Gaji per store + laporan keuangan per store (2026-09-27) ✅
+Detail di `docs/plan-gaji.md`. Migration `1789842089778`.
+- `salary_config` per store (tingkat lama disalin ke setiap store). `computeSalary` + validasi tingkat (tanpa celah atau tumpang tindih). 20/25/30 box → 175.000/205.000/240.000, lebih dari 30 box tetap 240.000.
+- `daily_salary` per `(date, store_id)` + `breakdown`. Generate gaji otomatis membuat/memperbarui 1 pengeluaran "Gaji" per store (`pengeluaran.daily_salary_id`).
+- `pengeluaran.store_id` (NULL = Umum). `GET /finance/summary?store_id=`: omzet dan pengeluaran store itu, biaya umum ditampilkan terpisah, HPP bahan terjual hanya sebagai info.
+- HPP tenaga kerja: `stores.labor_target_boxes` (default 30) + `labor_reference_store_id` (Depok → Kalibata). 240.000 / 30 = Rp 8.000 per Box Besar, Rp 4.000 per Box Kecil.
+- UI: `/config/salary` (gaji pokok + bonus + simulasi + salin), `/salary` (per store, rincian), tab Store (acuan HPP), `/summary` dan `/cashflow` per store. Kategori "Gaji" dihapus dari input manual.
+- Test: **144 lulus**.
+

@@ -37,7 +37,7 @@ describe.skipIf(!hasTestDb)('auto stock deduction lifecycle', () => {
 
     beforeEach(async () => {
         fakeRedis.store.clear();
-        await db.pool.query('TRUNCATE orders, order_items, order_item_variants, variant_recipe, stock_history, stock, daily_quota, variant, menu RESTART IDENTITY CASCADE');
+        await db.pool.query('TRUNCATE orders, order_items, order_item_variants, variant_recipe, stock_history, stock, daily_quota, variant, menu, salary_config RESTART IDENTITY CASCADE');
         await db.pool.query(`INSERT INTO menu (name, price, box_multiplier, max_flavors) VALUES ('FULL', 65000, 1, 3), ('HALF', 35000, 0.5, 1)`);
         await db.pool.query(`INSERT INTO variant (variant_name) VALUES ('Dark Choco'), ('Vanilla')`);
         await db.pool.query(`INSERT INTO daily_quota (date, qty, store_id) VALUES ($1, 100, 1)`, [DATE]);
@@ -245,6 +245,15 @@ describe.skipIf(!hasTestDb)('auto stock deduction lifecycle', () => {
             expect(hpp.hpp).toBe(9300);
             expect(hpp.breakdown.filter(l => l.kind === 'packaging').map(l => l.item_name)).toEqual(['Box Besar', 'Garpu']);
             expect((await recipe.getVariantHpp([1], 'HALF', 1)).breakdown.filter(l => l.kind === 'packaging').map(l => l.item_name)).toEqual(['Box Kecil', 'Garpu']);
+
+            // Labor: 240.000 at 30 boxes → 8.000 per Box Besar, × porsi (½) per Box Kecil.
+            const { updateSalaryConfig } = await import('../salary.service');
+            await updateSalaryConfig(1, [
+                { min_box: 0, max_box: 15, amount: 150000, is_fixed: true },
+                { min_box: 16, max_box: 20, amount: 5000 }, { min_box: 21, max_box: 25, amount: 6000 }, { min_box: 26, max_box: 30, amount: 7000 },
+            ]);
+            expect(await recipe.getVariantHpp([1], 'FULL', 1)).toMatchObject({ hpp_labor: 8000, hpp: 17300, labor: { target_boxes: 30 } });
+            expect((await recipe.getVariantHpp([1], 'HALF', 1)).hpp_labor).toBe(4000);
         });
 
         it('guards: duplicate rule, bad N, delete while used; copy to another store', async () => {

@@ -19,6 +19,9 @@ describe.skipIf(!hasTestDb)('services on pg (shape parity & behaviour)', () => {
     });
 
     afterAll(async () => {
+        // Don't leave salary tiers behind: other suites compute HPP (incl. labor) on these stores.
+        await db?.pool.query('TRUNCATE salary_config, daily_salary RESTART IDENTITY CASCADE');
+        await db?.pool.query('UPDATE stores SET labor_target_boxes = 30, labor_reference_store_id = NULL');
         await db?.pool.end();
     });
 
@@ -26,6 +29,7 @@ describe.skipIf(!hasTestDb)('services on pg (shape parity & behaviour)', () => {
         fakeRedis.store.clear();
         await db.pool.query(`TRUNCATE capital, debt, pengeluaran, penjualan, transactions, salary_config, daily_salary,
             orders, order_items, daily_quota, hourly_quota, menu, variant, push_subscriptions RESTART IDENTITY CASCADE`);
+        await db.pool.query('UPDATE stores SET labor_target_boxes = 30, labor_reference_store_id = NULL');
     });
 
     const isTimestampString = (v: unknown) => typeof v === 'string' && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/.test(v);
@@ -73,21 +77,51 @@ describe.skipIf(!hasTestDb)('services on pg (shape parity & behaviour)', () => {
         expect((await db.pool.query('SELECT count(*)::int AS n FROM transactions')).rows[0].n).toBe(5);
     });
 
-    it('salary: config replace is atomic, preview counts HALF as 0.5, daily upsert', async () => {
+    it('salary per store: atomic replace, HALF = 0.5, expense booked once, labor cost via reference store', async () => {
         const salary = await import('../salary.service');
-        await salary.updateSalaryConfig([{ min_box: 1, max_box: 10, amount: 5000, is_fixed: false }]);
-        await expect(salary.updateSalaryConfig([{ min_box: null as any, max_box: null, amount: 1, is_fixed: false }])).rejects.toBeTruthy();
-        expect(await salary.getSalaryConfig()).toHaveLength(1); // old config survived the failed replace
+        const tiers = [
+            { min_box: 0, max_box: 15, amount: 150000, is_fixed: true },
+            { min_box: 16, max_box: 20, amount: 5000, is_fixed: false },
+            { min_box: 21, max_box: 25, amount: 6000, is_fixed: false },
+            { min_box: 26, max_box: 30, amount: 7000, is_fixed: false },
+        ];
+        await salary.updateSalaryConfig(1, tiers);
+        await expect(salary.updateSalaryConfig(1, [tiers[0], { ...tiers[1], min_box: 15 }])).rejects.toMatchObject({ status: 400 });
+        expect(await salary.getSalaryConfig(1)).toHaveLength(4); // old config survived the failed replace
+        expect(await salary.getSalaryConfig(2)).toHaveLength(0);
 
-        await db.pool.query(`INSERT INTO orders (customer_name, customer_phone, pickup_date, status, store_id) VALUES ('A', '0812', '2099-01-05', 'PAID', 1)`);
-        await db.pool.query(`INSERT INTO order_items (order_id, box_type, name, qty) VALUES (1, 'FULL', 'x', 2), (1, 'HALF', 'y', 3)`);
-        const preview = await salary.calculateSalaryPreview('2099-01-05');
-        expect(preview).toMatchObject({ totalBoxesRaw: 3.5, totalBoxesRounded: 4, totalSalary: 20000 });
+        // Store 1: 18 FULL + 5 HALF = 20.5 → 21 boxes → 150.000 + 25.000 + 6.000. Store 2's order doesn't count.
+        await db.pool.query(`INSERT INTO orders (customer_name, customer_phone, pickup_date, status, store_id) VALUES
+            ('A', '0812', '2099-01-05', 'PAID', 1), ('B', '0812', '2099-01-05', 'UNPAID', 1), ('C', '0812', '2099-01-05', 'DONE', 2)`);
+        await db.pool.query(`INSERT INTO order_items (order_id, box_type, name, qty) VALUES (1, 'FULL', 'x', 18), (1, 'HALF', 'y', 5), (2, 'FULL', 'z', 9), (3, 'FULL', 'w', 4)`);
+        const preview = await salary.calculateSalaryPreview('2099-01-05', 1);
+        expect(preview).toMatchObject({ totalBoxesRaw: 20.5, totalBoxesRounded: 21, totalSalary: 181000 });
+        expect(preview.breakdown.map(l => l.amount)).toEqual([150000, 25000, 6000]);
 
-        await salary.generateDailySalary('2099-01-05');
-        const saved = await salary.generateDailySalary('2099-01-05');
-        expect(saved).toMatchObject({ date: '2099-01-05', total_boxes: 4, total_salary: 20000 });
-        expect(await salary.getDailySalaries()).toHaveLength(1);
+        await salary.generateDailySalary('2099-01-05', 1);
+        const saved = await salary.generateDailySalary('2099-01-05', 1);
+        expect(saved).toMatchObject({ date: '2099-01-05', store_id: 1, total_boxes: 21, total_salary: 181000 });
+        const expenses = await db.pool.query('SELECT name, category, price, store_id, daily_salary_id FROM pengeluaran');
+        expect(expenses.rows).toEqual([{ name: 'Gaji harian RPN Store Pancoran 2099-01-05', category: 'Gaji', price: 181000, store_id: 1, daily_salary_id: saved.id }]);
+
+        // Store 2 has no tiers → Rp 0, no expense. After copying the tiers it gets its own salary + expense.
+        expect((await salary.generateDailySalary('2099-01-05', 2)).total_salary).toBe(0);
+        expect((await db.pool.query('SELECT count(*)::int AS n FROM pengeluaran')).rows[0].n).toBe(1);
+        await salary.copySalaryConfig(1, 2);
+        expect((await salary.generateDailySalary('2099-01-05', 2)).total_salary).toBe(150000);
+        expect(await salary.getDailySalaries(2)).toHaveLength(1);
+        expect((await db.pool.query('SELECT count(*)::int AS n FROM pengeluaran')).rows[0].n).toBe(2);
+
+        // HPP labor: 240.000 / 30 = 8.000 per box; store 2 can use store 1 as its reference.
+        await salary.updateSalaryConfig(2, [{ min_box: 0, max_box: null, amount: 0, is_fixed: true }]);
+        expect(await salary.getLaborCost(1)).toMatchObject({ per_box: 8000, target_boxes: 30, reference_store_id: 1 });
+        expect((await salary.getLaborCost(2))?.per_box).toBe(0);
+        const store = await import('../store.service');
+        await store.updateStore(2, { labor_reference_store_id: 1 });
+        expect(await salary.getLaborCost(2)).toMatchObject({ per_box: 8000, reference_store_id: 1 });
+        await expect(store.updateStore(1, { labor_reference_store_id: 2 })).rejects.toMatchObject({ status: 400 }); // no chains
+        await store.updateStore(1, { labor_target_boxes: 20 });
+        expect((await salary.getLaborCost(2))?.per_box).toBe(8750);
     });
 
     it('finance summary from SQL aggregates', async () => {
@@ -95,11 +129,22 @@ describe.skipIf(!hasTestDb)('services on pg (shape parity & behaviour)', () => {
         await db.pool.query(`INSERT INTO orders (customer_name, customer_phone, pickup_date, status, store_id) VALUES ('A', '0812', '2099-01-05', 'DONE', 1), ('B', '0812', '2099-01-05', 'UNPAID', 1)`);
         await db.pool.query(`INSERT INTO order_items (order_id, box_type, name, qty) VALUES (1, 'FULL', 'x', 2), (1, 'HALF', 'y', 1), (2, 'FULL', 'z', 9)`);
         await db.pool.query(`INSERT INTO pengeluaran (name, price, date) VALUES ('Gas', 30000, '2099-01-05')`);
+        await db.pool.query(`INSERT INTO pengeluaran (name, category, price, date, store_id) VALUES ('Gaji', 'Gaji', 150000, '2099-01-05', 1), ('Sewa', NULL, 50000, '2099-01-05', 2)`);
+        await db.pool.query(`INSERT INTO orders (customer_name, customer_phone, pickup_date, status, store_id) VALUES ('C', '0812', '2099-01-05', 'DONE', 2)`);
+        await db.pool.query(`INSERT INTO order_items (order_id, box_type, name, qty) VALUES (3, 'FULL', 'q', 1)`);
         await db.pool.query(`INSERT INTO debt (source, total_amount, remaining_amount, status) VALUES ('Bank', 100, 60, 'ACTIVE')`);
         const { getWeeklySummary } = await import('../finance.service');
         expect(await getWeeklySummary('2099-01-01', '2099-01-07')).toMatchObject({
-            totalRevenue: 165000, totalCost: 30000, grossProfit: 135000, totalBoxes: 3, remainingDebt: 60,
+            totalRevenue: 230000, totalCost: 230000, grossProfit: 0, totalBoxes: 4, remainingDebt: 60, generalCost: 30000, salaryCost: 150000,
         });
+        // Per store: its own orders and expenses; general expenses shown separately, not counted.
+        expect(await getWeeklySummary('2099-01-01', '2099-01-07', 1)).toMatchObject({
+            totalRevenue: 165000, totalCost: 150000, grossProfit: 15000, totalBoxes: 3, generalCost: 30000, salaryCost: 150000, storeId: 1,
+        });
+        expect(await getWeeklySummary('2099-01-01', '2099-01-07', 2)).toMatchObject({ totalRevenue: 65000, totalCost: 50000, salaryCost: 0 });
+        const { getPengeluaran } = await import('../pengeluaran.service');
+        expect((await getPengeluaran(2)).map(p => p.name)).toEqual(['Sewa']);
+        expect((await getPengeluaran('general')).map(p => p.name)).toEqual(['Gas']);
     });
 
     it('menu / variant / store: list, partial update, 404', async () => {

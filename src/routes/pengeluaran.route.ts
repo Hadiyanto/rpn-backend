@@ -4,10 +4,12 @@ import { getPengeluaran, createPengeluaran } from '../services/pengeluaran.servi
 
 const router = Router();
 
-router.get('/pengeluaran', async (_req, res) => {
+// GET /pengeluaran[?store_id=1 | ?store_id=general]
+router.get('/pengeluaran', async (req, res) => {
     try {
-        const data = await getPengeluaran();
-        res.json({ status: 'ok', data });
+        const raw = req.query.store_id;
+        const store = raw === undefined || raw === '' ? undefined : raw === 'general' ? 'general' as const : Number(raw);
+        res.json({ status: 'ok', data: await getPengeluaran(store) });
     } catch (e: any) {
         sendError(res, e);
     }
@@ -15,14 +17,14 @@ router.get('/pengeluaran', async (_req, res) => {
 
 router.post('/pengeluaran', async (req, res) => {
     try {
-        const { name, category, price, date, receipt_image_url } = req.body;
+        const { name, category, price, date, receipt_image_url, store_id } = req.body;
 
         if (!name || price === undefined || price === null) {
             res.status(400).json({ status: 'error', message: 'name dan price wajib diisi' });
             return;
         }
 
-        const data = await createPengeluaran({ name, category, price: Number(price), date, receipt_image_url });
+        const data = await createPengeluaran({ name, category, price: Number(price), date, receipt_image_url, store_id });
         res.json({ status: 'ok', data });
     } catch (e: any) {
         sendError(res, e);

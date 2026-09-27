@@ -1,7 +1,13 @@
 import { pool } from '../config/db';
 import { getMenuPriceMap } from './menu.service';
 
-export const getWeeklySummary = async (start: string, end: string) => {
+/**
+ * Summary for a date range, for one store or (storeId undefined) the whole business.
+ * Per store: revenue and expenses of that store only; general expenses (store_id NULL) are shown
+ * separately and only counted in the whole-business view. Capital and debt are business-wide.
+ */
+export const getWeeklySummary = async (start: string, end: string, storeId?: number) => {
+    const store = storeId ?? null;
     // 1. Items of DONE orders in range, grouped per box type
     const { rows: itemRows } = await pool.query(`
         SELECT oi.box_type, SUM(oi.qty)::int AS qty
@@ -10,8 +16,9 @@ export const getWeeklySummary = async (start: string, end: string) => {
         WHERE o.status = 'DONE'
           AND o.pickup_date >= $1::date
           AND o.pickup_date <= $2::date
+          AND ($3::int IS NULL OR o.store_id = $3)
         GROUP BY oi.box_type
-    `, [start, end]);
+    `, [start, end, store]);
 
     // Prices come from the menu table (including retired menus such as HAMPERS, so older
     // orders are still counted) instead of being hardcoded here.
@@ -25,10 +32,23 @@ export const getWeeklySummary = async (start: string, end: string) => {
     }
 
     // 2–4. Expenses in range, personal capital, remaining ACTIVE debt
-    const [{ rows: [cost] }, { rows: [capital] }, { rows: [debt] }] = await Promise.all([
-        pool.query('SELECT COALESCE(SUM(price), 0) AS total FROM pengeluaran WHERE date >= $1::date AND date <= $2::date', [start, end]),
+    const [{ rows: [cost] }, { rows: [capital] }, { rows: [debt] }, { rows: [stockCost] }] = await Promise.all([
+        pool.query(`
+            SELECT COALESCE(SUM(price) FILTER (WHERE $3::int IS NULL OR store_id = $3), 0) AS total,
+                   COALESCE(SUM(price) FILTER (WHERE store_id IS NULL), 0) AS general,
+                   COALESCE(SUM(price) FILTER (WHERE category = 'Gaji' AND ($3::int IS NULL OR store_id = $3)), 0) AS salary
+            FROM pengeluaran WHERE date >= $1::date AND date <= $2::date
+        `, [start, end, store]),
         pool.query('SELECT COALESCE(SUM(amount), 0) AS total FROM capital'),
         pool.query(`SELECT COALESCE(SUM(remaining_amount), 0) AS total FROM debt WHERE status = 'ACTIVE'`),
+        // Info only (not added to costs): ingredient + packaging cost booked by those orders.
+        // Purchases are usually recorded as expenses already, so adding it would count twice.
+        pool.query(`
+            SELECT COALESCE(SUM(-sh.qty_change * sh.unit_cost), 0) AS total
+            FROM stock_history sh JOIN orders o ON o.id = sh.order_id
+            WHERE o.status = 'DONE' AND o.pickup_date >= $1::date AND o.pickup_date <= $2::date
+              AND ($3::int IS NULL OR o.store_id = $3)
+        `, [start, end, store]),
     ]);
     const totalCost = Number(cost.total);
     const personalCapital = Number(capital.total);
@@ -57,5 +77,10 @@ export const getWeeklySummary = async (start: string, end: string) => {
         returnToCapital: Number(returnToCapital.toFixed(2)),
         totalBoxes,
         remainingDebt,
+        storeId: store,
+        /** Expenses without a store; included in totalCost only for the whole-business view. */
+        generalCost: Number(cost.general),
+        salaryCost: Number(cost.salary),
+        stockCostSold: Math.round(Number(stockCost.total)),
     };
 };
