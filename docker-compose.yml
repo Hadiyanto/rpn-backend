@@ -1,0 +1,42 @@
+# Backend on the same Docker network as the shared Postgres ("shared-postgres" on network
+# "backend", from the separate postgres compose). Start that one first, then:
+#
+#   docker compose up -d --build
+#
+# Variables come from rpn-backend/.env (also used by `npm run dev`). For Docker, add there:
+#
+#   DOCKER_DATABASE_URL=postgresql://postgres:<password, URL-encoded>@shared-postgres:5432/rpn_db
+#
+# URL-encode special characters in the password (! → %21, @ → %40, # → %23).
+# Inside the network the host is the container name "shared-postgres" and the port is 5432
+# (not 127.0.0.1 / the published port). Redis stays on Upstash (UPSTASH_* in .env).
+
+services:
+  backend:
+    build:
+      context: .
+    container_name: rpn-backend
+    env_file:
+      - ./.env
+    environment:
+      # Values here override .env.
+      DATABASE_URL: ${DOCKER_DATABASE_URL:?add DOCKER_DATABASE_URL to rpn-backend/.env (see top of docker-compose.yml)}
+      # The shared Postgres container has no TLS.
+      PG_SSL: "false"
+      PORT: 4000
+      CORS_ORIGINS: ${DOCKER_CORS_ORIGINS:-http://localhost:3000}
+      FRONTEND_URL: ${DOCKER_FRONTEND_URL:-http://localhost:3000}
+      # Keep true while another instance (Render) uses the same WhatsApp session.
+      WHATSAPP_DISABLED: ${WHATSAPP_DISABLED:-true}
+    ports:
+      # Only reachable from the host itself; nginx (infra/nginx/rpn-api.conf) serves it publicly.
+      - "127.0.0.1:${BACKEND_PORT:-4000}:4000"
+    networks:
+      - backend
+    restart: unless-stopped
+
+networks:
+  backend:
+    # Created by the shared Postgres compose (networks.backend.name: backend).
+    external: true
+    name: backend
