@@ -4,6 +4,7 @@ import {
     BufferJSON,
     DisconnectReason,
     fetchLatestBaileysVersion,
+    makeCacheableSignalKeyStore,
     proto,
     type CacheStore,
 } from '@whiskeysockets/baileys';
@@ -88,7 +89,12 @@ class WhatsAppService {
             this.sock = makeWASocket({
                 version,
                 logger: this.logger,
-                auth: state,
+                // Signal keys (per-contact sessions) cached in memory in front of Redis: every
+                // message advances the session, and the next message must be encrypted with the
+                // latest one. Reading it back from Upstash (a round trip, possibly a lagging read
+                // replica) could hand Baileys an older session → the recipient sees
+                // "Menunggu pesan ini" from the second message on. Writes still go to Redis.
+                auth: { creds: state.creds, keys: makeCacheableSignalKeyStore(state.keys, this.logger) },
                 // A standard browser identity: WhatsApp may refuse to link made-up ones
                 // ("Can't link new devices right now").
                 browser: Browsers.macOS('Desktop'),
