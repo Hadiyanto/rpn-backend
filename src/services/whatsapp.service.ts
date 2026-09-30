@@ -96,7 +96,8 @@ class WhatsAppService {
                         (lastDisconnect?.error as any)?.output?.payload?.statusCode ||
                         (lastDisconnect?.error as any)?.output?.statusCode;
 
-                    console.log('Connection closed. Status:', statusCode);
+                    // The reason text tells e.g. "Connection Closed" (428) from "Stream Errored" / "QR refs attempts ended".
+                    console.log('Connection closed. Status:', statusCode, '-', (lastDisconnect?.error as any)?.message ?? 'no reason');
                     this.isConnected = false;
                     this.qr = null;
 
