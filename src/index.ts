@@ -6,7 +6,7 @@ import rateLimit from 'express-rate-limit';
 import healthRouter from './health';
 import apiRoutes from './routes';
 
-import { getWhatsAppService } from './services/whatsapp.service';
+import { getWhatsAppService, isWhatsAppDisabled } from './services/whatsapp.service';
 import { sendError } from './utils/errors';
 
 dotenv.config();
@@ -73,7 +73,7 @@ app.listen(port, () => {
     // Initialize WhatsApp service. WHATSAPP_DISABLED=true skips it — needed when running a second
     // instance (e.g. local Docker) against the production Redis: two sockets on the same WA session
     // kick each other off and can log out the production number.
-    if (process.env.WHATSAPP_DISABLED === 'true') {
+    if (isWhatsAppDisabled()) {
         console.log('[server]: WhatsApp disabled (WHATSAPP_DISABLED=true)');
         return;
     }

@@ -8,10 +8,23 @@ import QRCode from 'qrcode';
 import { useRedisAuthState } from '../utils/useRedisAuthState';
 import { LEGACY_WA_SESSION_PREFIX, redisKeys } from '../utils/redisKeys';
 
+/**
+ * What the admin page shows:
+ *  disabled   WHATSAPP_DISABLED=true on this server (another instance owns the session)
+ *  starting   socket not up yet / reconnecting
+ *  qr         waiting for the QR to be scanned
+ *  connected  linked and ready to send
+ *  replaced   the session was taken over by another device/server (440/409); needs a new QR
+ */
+export type WhatsAppState = 'disabled' | 'starting' | 'qr' | 'connected' | 'replaced';
+
+export const isWhatsAppDisabled = () => process.env.WHATSAPP_DISABLED === 'true';
+
 class WhatsAppService {
     public sock: any = null;
     public qr: string | null = null;
     public isConnected = false;
+    private state: WhatsAppState = 'starting';
 
     // Auth keys live under rpn:wa:main:* (renamed from the pre-namespace rpn-wa-session:* on first start).
     private sessionName = redisKeys.waSession('main');
@@ -26,8 +39,13 @@ class WhatsAppService {
     }
 
     async initialize() {
+        if (isWhatsAppDisabled()) {
+            this.state = 'disabled';
+            return;
+        }
         if (this.initializing) return;
         this.initializing = true;
+        this.state = 'starting';
 
         try {
             // 🔥 HARD STOP old socket (prevent zombie connection)
@@ -59,6 +77,7 @@ class WhatsAppService {
 
                 if (qr) {
                     this.qr = qr;
+                    this.state = 'qr';
                     console.log('QR Code generated');
                 }
 
@@ -66,6 +85,7 @@ class WhatsAppService {
                     console.log('WhatsApp Connected!');
                     this.isConnected = true;
                     this.qr = null;
+                    this.state = 'connected';
                 }
 
                 if (connection === 'close') {
@@ -75,25 +95,33 @@ class WhatsAppService {
 
                     console.log('Connection closed. Status:', statusCode);
                     this.isConnected = false;
+                    this.qr = null;
 
-                    // ❌ DO NOT AUTO RECONNECT FOR 440 / 409
+                    // ❌ DO NOT AUTO RECONNECT FOR 440 / 409: another device/server took the session;
+                    // reconnecting would just fight it. The admin page offers "QR baru" instead.
                     if (statusCode === 440 || statusCode === 409) {
                         console.log('Connection replaced. Waiting manual action.');
+                        this.state = 'replaced';
                         return;
                     }
 
-                    // 🔓 LOGGED OUT → CLEAR SESSION
+                    // 🔓 LOGGED OUT (unlinked from the phone) → clear the session and start over,
+                    // so a fresh QR shows up without pressing anything.
                     if (statusCode === DisconnectReason.loggedOut) {
-                        console.log('Logged out. Clearing Redis session...');
+                        console.log('Logged out. Clearing Redis session and generating a new QR...');
                         if (this.clearStateMethod) {
                             await this.clearStateMethod();
                         }
+                        this.state = 'starting';
+                        setTimeout(() => this.initialize(), 1000);
                         return;
                     }
 
-                    // 🔁 NORMAL RECONNECT
-                    console.log('Reconnecting in 5 seconds...');
-                    setTimeout(() => this.initialize(), 5000);
+                    // 🔁 NORMAL RECONNECT (515 right after scanning is expected: WhatsApp restarts the stream)
+                    const wait = statusCode === DisconnectReason.restartRequired ? 500 : 5000;
+                    this.state = 'starting';
+                    console.log(`Reconnecting in ${wait / 1000} seconds...`);
+                    setTimeout(() => this.initialize(), wait);
                 }
             });
 
@@ -108,6 +136,9 @@ class WhatsAppService {
     }
 
     async getQRCode() {
+        if (isWhatsAppDisabled()) {
+            return { connected: false, qr: null, disabled: true, message: 'WhatsApp dinonaktifkan di server ini (WHATSAPP_DISABLED=true)' };
+        }
         if (this.isConnected) {
             return { connected: true, qr: null };
         }
@@ -121,6 +152,9 @@ class WhatsAppService {
     }
 
     async regenerateQR() {
+        if (isWhatsAppDisabled()) {
+            return { success: false, error: 'WhatsApp dinonaktifkan di server ini (WHATSAPP_DISABLED=true)' };
+        }
         try {
             // 🔥 Do not logout if already closed
             if (this.sock && this.isConnected) {
@@ -150,7 +184,9 @@ class WhatsAppService {
     getConnectionStatus() {
         return {
             connected: this.isConnected,
-            hasQR: !!this.qr
+            hasQR: !!this.qr,
+            disabled: isWhatsAppDisabled(),
+            state: isWhatsAppDisabled() ? 'disabled' as const : this.state,
         };
     }
 
