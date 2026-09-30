@@ -1,5 +1,6 @@
 import {
     makeWASocket,
+    Browsers,
     DisconnectReason,
     fetchLatestBaileysVersion
 } from '@whiskeysockets/baileys';
@@ -68,7 +69,9 @@ class WhatsAppService {
                 version,
                 logger: this.logger,
                 auth: state,
-                browser: ['RPN', 'Chrome', '1.0.0']
+                // A standard browser identity: WhatsApp may refuse to link made-up ones
+                // ("Can't link new devices right now").
+                browser: Browsers.macOS('Desktop')
             });
 
             // 🔔 CONNECTION HANDLER
