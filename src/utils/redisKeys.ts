@@ -9,6 +9,7 @@
 //   rpn:cache:menu:v{n}                              cached GET /menu list                (TTL: 30 days, dropped on change)
 //   rpn:cache:variants:v{n}                          cached GET /variants list            (TTL: 30 days, dropped on change)
 //   rpn:wa:{session}:{type}                          WhatsApp (Baileys) auth state         (no TTL)
+//   rpn:wa:sent:{messageId}                          sent WhatsApp message, for re-sending (TTL: 3 days)
 //
 // Bump a cache version when the cached row shape changes, so old entries are simply ignored.
 
@@ -24,6 +25,8 @@ export const redisKeys = {
     variantsCache: `${REDIS_NAMESPACE}:cache:variants:v2`,
     /** Prefix for one WhatsApp session's auth keys ("rpn:wa:main" → "rpn:wa:main:creds", …). */
     waSession: (session: string) => `${REDIS_NAMESPACE}:wa:${session}`,
+    /** A message the bot sent, kept so it can be re-encrypted when the recipient's phone asks for it. */
+    waSentMessage: (messageId: string) => `${REDIS_NAMESPACE}:wa:sent:${messageId}`,
 };
 
 /** SCAN patterns for scripts. All of them stay inside the rpn: namespace. */

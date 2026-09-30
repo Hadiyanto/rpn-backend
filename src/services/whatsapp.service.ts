@@ -1,13 +1,31 @@
 import {
     makeWASocket,
     Browsers,
+    BufferJSON,
     DisconnectReason,
-    fetchLatestBaileysVersion
+    fetchLatestBaileysVersion,
+    proto,
+    type CacheStore,
 } from '@whiskeysockets/baileys';
 import pino from 'pino';
 import QRCode from 'qrcode';
 import { useRedisAuthState } from '../utils/useRedisAuthState';
 import { LEGACY_WA_SESSION_PREFIX, redisKeys } from '../utils/redisKeys';
+import { redis } from '../config/redis';
+
+// How long a sent message can still be re-sent on request (phones ask within minutes, rarely later).
+const SENT_MESSAGE_TTL = 3 * 24 * 60 * 60;
+
+/** Minimal in-memory CacheStore (Baileys counts decrypt retries per message here). */
+const memoryCache = (): CacheStore => {
+    const map = new Map<string, unknown>();
+    return {
+        get: <T>(key: string) => map.get(key) as T | undefined,
+        set: <T>(key: string, value: T) => { map.set(key, value); if (map.size > 5000) map.delete(map.keys().next().value as string); },
+        del: (key: string) => { map.delete(key); },
+        flushAll: () => map.clear(),
+    };
+};
 
 /**
  * What the admin page shows:
@@ -33,6 +51,8 @@ class WhatsAppService {
     private logger = pino({ level: 'silent' });
 
     private sendingQueue: Promise<any> = Promise.resolve();
+    // Survives reconnects, so retry counting isn't reset every time the socket restarts.
+    private msgRetryCounterCache = memoryCache();
     private initializing = false;
 
     private delay(ms: number) {
@@ -71,7 +91,17 @@ class WhatsAppService {
                 auth: state,
                 // A standard browser identity: WhatsApp may refuse to link made-up ones
                 // ("Can't link new devices right now").
-                browser: Browsers.macOS('Desktop')
+                browser: Browsers.macOS('Desktop'),
+                // The bot only sends notifications: skip downloading chat history after linking
+                // (thousands of keys/messages to store) and don't show the number as "online".
+                syncFullHistory: false,
+                shouldSyncHistoryMessage: () => false,
+                markOnlineOnConnect: false,
+                // When a recipient's phone can't decrypt a message ("Menunggu pesan ini"), it asks us
+                // to send it again; Baileys re-encrypts what getMessage returns. Without it the
+                // message stays unreadable.
+                getMessage: async (key: proto.IMessageKey) => (key.id ? this.loadSentMessage(key.id) : undefined),
+                msgRetryCounterCache: this.msgRetryCounterCache
             });
 
             // 🔔 CONNECTION HANDLER
@@ -185,6 +215,32 @@ class WhatsAppService {
         }
     }
 
+    /** Keeps a sent message for a few days so a retry request from the recipient can be served. */
+    private async storeSentMessage(sent: { key?: proto.IMessageKey; message?: proto.IMessage | null } | undefined) {
+        if (!sent?.key?.id || !sent.message) return;
+        try {
+            await redis.set(
+                redisKeys.waSentMessage(sent.key.id),
+                JSON.stringify(proto.Message.toObject(proto.Message.fromObject(sent.message)), BufferJSON.replacer),
+                { ex: SENT_MESSAGE_TTL },
+            );
+        } catch (err) {
+            console.error('[wa] could not store sent message for retries', err);
+        }
+    }
+
+    private async loadSentMessage(id: string): Promise<proto.IMessage | undefined> {
+        try {
+            const raw = await redis.get(redisKeys.waSentMessage(id));
+            if (!raw) return undefined;
+            const obj = JSON.parse(typeof raw === 'string' ? raw : JSON.stringify(raw), BufferJSON.reviver);
+            return proto.Message.fromObject(obj);
+        } catch (err) {
+            console.error('[wa] could not load sent message for retry', err);
+            return undefined;
+        }
+    }
+
     getConnectionStatus() {
         return {
             connected: this.isConnected,
@@ -206,7 +262,8 @@ class WhatsAppService {
             }
 
             const jid = `${phone.replace(/[^0-9]/g, '')}@s.whatsapp.net`;
-            await this.sock.sendMessage(jid, { text: message });
+            const sent = await this.sock.sendMessage(jid, { text: message });
+            await this.storeSentMessage(sent);
 
             return { success: true };
         });

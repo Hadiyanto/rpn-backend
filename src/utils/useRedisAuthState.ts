@@ -119,31 +119,41 @@ export const useRedisAuthState = async (sessionName: string, legacyPrefix?: stri
                     return data;
                 },
 
+                // Batched writes: history/app-state sync hands over thousands of keys at once, and
+                // one REST call per key (Upstash) made queries time out. Chunked so a single
+                // request stays well under Upstash's request size limit.
                 set: async (data) => {
+                    const CHUNK = 200;
+                    let pipeline = redis.pipeline();
+                    let pending = 0;
+                    const flush = async () => {
+                        if (pending === 0) return;
+                        await pipeline.exec();
+                        pipeline = redis.pipeline();
+                        pending = 0;
+                    };
                     for (const category in data) {
                         const dict = (data as any)[category];
                         if (!dict) continue;
 
                         const hashKey = `${sessionName}:${category}`;
-
+                        let toSet: Record<string, string> = {};
+                        const toDelete: string[] = [];
                         for (const id in dict) {
                             const value = dict[id];
-
-                            if (value) {
-                                await redis.hset(
-                                    hashKey,
-                                    {
-                                        [id]: JSON.stringify(
-                                            value,
-                                            (key, val) => BufferJSON.replacer(key, val)
-                                        )
-                                    }
-                                );
-                            } else {
-                                await redis.hdel(hashKey, id);
+                            if (!value) { toDelete.push(id); continue; }
+                            toSet[id] = JSON.stringify(value, (key, val) => BufferJSON.replacer(key, val));
+                            if (Object.keys(toSet).length >= CHUNK) {
+                                pipeline.hset(hashKey, toSet); pending++;
+                                toSet = {};
+                                await flush();
                             }
                         }
+                        if (Object.keys(toSet).length > 0) { pipeline.hset(hashKey, toSet); pending++; }
+                        if (toDelete.length > 0) { pipeline.hdel(hashKey, ...toDelete); pending++; }
+                        if (pending >= 20) await flush();
                     }
+                    await flush();
                 }
             }
         },
