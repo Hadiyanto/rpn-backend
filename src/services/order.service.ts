@@ -121,6 +121,9 @@ const attachVariantIds = async <T extends { items?: { id: number }[] | null }>(o
     return orders;
 };
 
+/** Latest pickup time for every store (keep in sync with rpn-frontend/utils/pickupHours.ts). */
+const LAST_PICKUP_TIME = '17:00';
+
 export const createOrder = async (payload: CreateOrderPayload) => {
     const { payment_method, delivery_method, delivery_lat, delivery_lng, delivery_address, delivery_driver_note, delivery_area_id } = payload;
 
@@ -171,6 +174,9 @@ export const createOrder = async (payload: CreateOrderPayload) => {
             const openTime = storeRes.rows[0]?.open_time;
             if (openTime && hourStr < openTime) {
                 throw new ConflictError(`MOHON MAAF: Toko baru buka jam ${openTime}. Silakan pilih jam lain.`);
+            }
+            if (pickup_time.slice(0, 5) > LAST_PICKUP_TIME) {
+                throw new ConflictError(`MOHON MAAF: Pengambilan paling lambat jam ${LAST_PICKUP_TIME}. Silakan pilih jam lain.`);
             }
 
             // Fetch base capacity and active status from DB
