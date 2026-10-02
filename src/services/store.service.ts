@@ -2,6 +2,8 @@ import { NotFoundError } from '../utils/errors';
 import { ValidationError } from '../utils/validation';
 import { pool, updateRowById } from '../config/db';
 
+const HHMM_RE = /^([01]\d|2[0-3]):[0-5]\d$/;
+
 export const getStores = async () => {
     const { rows } = await pool.query('SELECT * FROM stores WHERE is_active = true ORDER BY id ASC');
     return rows;
@@ -23,6 +25,8 @@ export interface UpdateStorePayload {
     phone?: string | null;
     is_active?: boolean;
     open_time?: string;
+    /** Latest pickup time ("HH:mm"); orders after it are refused. */
+    last_pickup_time?: string;
     bank_name?: string | null;
     bank_account_number?: string | null;
     bank_account_name?: string | null;
@@ -34,6 +38,16 @@ export interface UpdateStorePayload {
 }
 
 export const updateStore = async (id: number, payload: UpdateStorePayload) => {
+    if (payload.last_pickup_time !== undefined) {
+        if (typeof payload.last_pickup_time !== 'string' || !HHMM_RE.test(payload.last_pickup_time)) {
+            throw new ValidationError('Jam terakhir pickup harus berformat HH:mm');
+        }
+        const openTime = payload.open_time
+            ?? (await pool.query('SELECT open_time FROM stores WHERE id = $1', [id])).rows[0]?.open_time;
+        if (openTime && payload.last_pickup_time < openTime) {
+            throw new ValidationError(`Jam terakhir pickup tidak boleh sebelum jam buka (${openTime})`);
+        }
+    }
     if (payload.labor_target_boxes !== undefined) {
         const n = Number(payload.labor_target_boxes);
         if (!Number.isInteger(n) || n < 1) throw new ValidationError('Target box per hari harus bilangan bulat ≥ 1');
@@ -60,6 +74,7 @@ export const updateStore = async (id: number, payload: UpdateStorePayload) => {
         phone: payload.phone,
         is_active: payload.is_active,
         open_time: payload.open_time,
+        last_pickup_time: payload.last_pickup_time,
         bank_name: payload.bank_name,
         bank_account_number: payload.bank_account_number,
         bank_account_name: payload.bank_account_name,

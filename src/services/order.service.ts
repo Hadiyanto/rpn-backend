@@ -121,9 +121,6 @@ const attachVariantIds = async <T extends { items?: { id: number }[] | null }>(o
     return orders;
 };
 
-/** Latest pickup time for every store (keep in sync with rpn-frontend/utils/pickupHours.ts). */
-const LAST_PICKUP_TIME = '17:00';
-
 export const createOrder = async (payload: CreateOrderPayload) => {
     const { payment_method, delivery_method, delivery_lat, delivery_lng, delivery_address, delivery_driver_note, delivery_area_id } = payload;
 
@@ -168,15 +165,15 @@ export const createOrder = async (payload: CreateOrderPayload) => {
         if (pickup_time) {
             hourStr = pickup_time.split(':')[0] + ':00';
 
-            // Server-side floor check against the store's opening hour. The frontend
-            // already disables hours before this, but don't rely solely on client-side filtering.
-            const storeRes = await pool.query('SELECT open_time FROM stores WHERE id = $1', [store_id]);
-            const openTime = storeRes.rows[0]?.open_time;
+            // Server-side check against the store's opening hour and last pickup time. The frontend
+            // already disables hours outside them, but don't rely solely on client-side filtering.
+            const storeRes = await pool.query('SELECT open_time, last_pickup_time FROM stores WHERE id = $1', [store_id]);
+            const { open_time: openTime, last_pickup_time: lastPickupTime } = storeRes.rows[0] ?? {};
             if (openTime && hourStr < openTime) {
                 throw new ConflictError(`MOHON MAAF: Toko baru buka jam ${openTime}. Silakan pilih jam lain.`);
             }
-            if (pickup_time.slice(0, 5) > LAST_PICKUP_TIME) {
-                throw new ConflictError(`MOHON MAAF: Pengambilan paling lambat jam ${LAST_PICKUP_TIME}. Silakan pilih jam lain.`);
+            if (lastPickupTime && pickup_time.slice(0, 5) > lastPickupTime) {
+                throw new ConflictError(`MOHON MAAF: Pengambilan paling lambat jam ${lastPickupTime}. Silakan pilih jam lain.`);
             }
 
             // Fetch base capacity and active status from DB
