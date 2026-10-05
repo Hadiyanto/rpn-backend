@@ -3,12 +3,13 @@ import { redis, ttlUntilDate } from '../utils/redis';
 import { BOX_UNITS_SQL, boxUnits, remainingQuota } from '../utils/boxUnits';
 import { dayOfWeek } from '../utils/date';
 import { redisKeys } from '../utils/redisKeys';
-import { ConflictError, NotFoundError } from '../utils/errors';
+import { ConflictError, NotFoundError, UpstreamError } from '../utils/errors';
 import { ensureDailyQuotaKey, syncDailyRedisQuota } from './dailyQuota.service';
 import { syncHourlyRedisQuota } from './hourlyQuota.service';
 import { checkVariantSelection, loadVariantCatalog } from './variantRecipe.service';
 import { applyOrderStockSafe, reverseOrderStockSafe } from './stockDeduction.service';
 import { priceOrderItems } from './variantPrice.service';
+import { getStoreDeliveryOptions, isStoreDeliveryAllowed, type DeliveryQuote } from './biteship.service';
 import type { PoolClient } from 'pg';
 import {
     ValidationError,
@@ -46,6 +47,9 @@ export interface CreateOrderPayload {
     delivery_address?: string | null;
     delivery_driver_note?: string | null;
     delivery_area_id?: string | null;
+    /** Store delivery courier the customer picked from the options (Biteship courier_code / service_code). */
+    delivery_courier_company?: string | null;
+    delivery_courier_type?: string | null;
 }
 
 export interface GetOrdersFilter {
@@ -78,6 +82,35 @@ const assertBoxesAvailable = async (storeId: number, items: ValidOrderItem[]) =>
 };
 
 export type PricedOrderItem = ValidOrderItem & { unit_price: number; price_variant_id: number | null };
+
+const DELIVERY_UNAVAILABLE = 'Store Delivery tidak tersedia untuk pesanan ini';
+
+/** Delivery options for these (priced) items, as Biteship quotes them right now. */
+const deliveryOptionsFor = async (storeId: number, payload: Pick<CreateOrderPayload, 'delivery_lat' | 'delivery_lng'>, items: PricedOrderItem[]) => {
+    if (!payload.delivery_lat || !payload.delivery_lng) throw new ValidationError('Titik lokasi pengiriman wajib diisi');
+    return getStoreDeliveryOptions({ store_id: storeId, lat: Number(payload.delivery_lat), lng: Number(payload.delivery_lng), items })
+        .catch(err => {
+            console.error('[Biteship] delivery quote failed:', err?.message ?? err);
+            throw new UpstreamError('Ongkir tidak bisa dihitung saat ini. Silakan coba lagi atau pilih metode pengambilan lain.');
+        });
+};
+
+/**
+ * Store delivery (BITESHIP_ENABLED=true, customer allowed by BITESHIP_WHITELIST): re-quotes the courier
+ * the customer picked server-side — the fee is never trusted from the client — so the customer is
+ * charged for, and the store books, exactly that courier.
+ */
+const resolveStoreDelivery = async (storeId: number, payload: CreateOrderPayload, items: PricedOrderItem[]): Promise<DeliveryQuote | null> => {
+    if (payload.delivery_method !== 'store_delivery') return null;
+    if (!isStoreDeliveryAllowed(payload.customer_phone)) throw new ValidationError(DELIVERY_UNAVAILABLE);
+    if (!payload.delivery_address?.trim()) throw new ValidationError('Alamat pengiriman wajib diisi');
+    if (!payload.delivery_courier_company || !payload.delivery_courier_type) throw new ValidationError('Kurir pengiriman wajib dipilih');
+
+    const options = await deliveryOptionsFor(storeId, payload, items);
+    const chosen = options.find(o => o.courier_company === payload.delivery_courier_company && o.courier_type === payload.delivery_courier_type);
+    if (!chosen) throw new ConflictError('MOHON MAAF: Kurir yang dipilih sedang tidak tersedia. Silakan cek ongkir lagi dan pilih kurir lain.');
+    return { fee: chosen.price, courier_company: chosen.courier_company, courier_type: chosen.courier_type };
+};
 
 /** Prices each item at the store (most expensive flavor; validates that every flavor has a price). */
 const priceItems = async (storeId: number, items: ValidOrderItem[]): Promise<PricedOrderItem[]> => {
@@ -121,6 +154,15 @@ const attachVariantIds = async <T extends { items?: { id: number }[] | null }>(o
     return orders;
 };
 
+/** Couriers (with fees) the customer can pick for store delivery — what createOrder will charge. */
+export const storeDeliveryOptionsForOrder = async (payload: Pick<CreateOrderPayload,
+    'store_id' | 'pesanan' | 'customer_phone' | 'delivery_lat' | 'delivery_lng'>) => {
+    if (!isStoreDeliveryAllowed(payload.customer_phone)) throw new ValidationError(DELIVERY_UNAVAILABLE);
+    const store_id = validateStoreId(payload.store_id);
+    const pesanan = await priceItems(store_id, validateOrderItems(payload.pesanan));
+    return deliveryOptionsFor(store_id, payload, pesanan);
+};
+
 export const createOrder = async (payload: CreateOrderPayload) => {
     const { payment_method, delivery_method, delivery_lat, delivery_lng, delivery_address, delivery_driver_note, delivery_area_id } = payload;
 
@@ -137,6 +179,7 @@ export const createOrder = async (payload: CreateOrderPayload) => {
     await assertVariantSelections(validItems);
     // Prices come from the store's flavor prices, never from the client.
     const pesanan = await priceItems(store_id, validItems);
+    const delivery = await resolveStoreDelivery(store_id, payload, pesanan);
 
     const requestedBoxQty = boxUnits(pesanan);
 
@@ -227,9 +270,10 @@ export const createOrder = async (payload: CreateOrderPayload) => {
             const orderRes = await client.query(`
             INSERT INTO orders (
                 customer_name, customer_phone, pickup_date, pickup_time, note, status, payment_method, store_id,
-                delivery_method, delivery_lat, delivery_lng, delivery_address, delivery_driver_note, delivery_area_id
+                delivery_method, delivery_lat, delivery_lng, delivery_address, delivery_driver_note, delivery_area_id,
+                delivery_fee, delivery_courier_company, delivery_courier_type
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
             RETURNING *
         `, [
                 customer_name,
@@ -246,6 +290,9 @@ export const createOrder = async (payload: CreateOrderPayload) => {
                 delivery_address ?? null,
                 delivery_driver_note ?? null,
                 delivery_area_id ?? null,
+                delivery?.fee ?? null,
+                delivery?.courier_company ?? null,
+                delivery?.courier_type ?? null,
             ]);
 
             const order = orderRes.rows[0];
@@ -481,6 +528,7 @@ export const getPublicOrder = async (token: string) => {
         store_id: order.store_id,
         has_transfer_img: !!order.transfer_img_url,
         total_amount: Number(order.total_amount),
+        delivery_fee: order.delivery_fee === null || order.delivery_fee === undefined ? null : Number(order.delivery_fee),
         // DOKU checkout link, only while it can still be paid.
         payment_url: order.payment_method === 'DOKU' && order.status === 'UNPAID'
             && (!order.doku_expired_at || new Date(order.doku_expired_at) > new Date())

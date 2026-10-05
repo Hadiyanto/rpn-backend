@@ -3,6 +3,8 @@ import { sendError } from '../utils/errors';
 import { buildShippingItems } from '../services/menu.service';
 import { biteshipGet, biteshipPost } from '../utils/biteship';
 import { getStoreById } from '../services/store.service';
+import { DEFAULT_RATE_COURIERS, isStoreDeliveryAllowed } from '../services/biteship.service';
+import { storeDeliveryOptionsForOrder } from '../services/order.service';
 
 const router = Router();
 
@@ -25,8 +27,30 @@ router.get('/biteship/areas', async (req, res) => {
     }
 });
 
-// Couriers asked for rates when the client doesn't specify any (instant + same-day coverage).
-const DEFAULT_RATE_COURIERS = 'gosend,grab,gojek,lalamove,paxel,borzo,sicepat,anteraja,jne,jnt';
+
+/**
+ * POST /api/biteship/eligibility { customer_phone } → { store_delivery: boolean }
+ * Whether the order form may offer Store Delivery to this customer (BITESHIP_ENABLED + BITESHIP_WHITELIST).
+ * The whitelist itself never leaves the server.
+ */
+router.post('/biteship/eligibility', (req, res) => {
+    res.json({ status: 'ok', data: { store_delivery: isStoreDeliveryAllowed(req.body?.customer_phone) } });
+});
+
+/**
+ * POST /api/biteship/store-delivery-options
+ *   { store_id, pesanan, customer_phone, delivery_lat, delivery_lng }
+ * → [{ courier_company, courier_type, courier_name, service_name, duration, price, shipping_fee, … }]
+ * The couriers the customer can pick (SELECTED_COURIER), priced exactly as POST /order charges them.
+ */
+router.post('/biteship/store-delivery-options', async (req, res) => {
+    try {
+        const { store_id, pesanan, customer_phone, delivery_lat, delivery_lng } = req.body ?? {};
+        res.json({ status: 'ok', data: await storeDeliveryOptionsForOrder({ store_id, pesanan, customer_phone, delivery_lat, delivery_lng }) });
+    } catch (e: any) {
+        sendError(res, e);
+    }
+});
 
 /**
  * POST /api/biteship/rates

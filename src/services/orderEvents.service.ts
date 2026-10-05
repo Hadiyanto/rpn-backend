@@ -32,7 +32,7 @@ const sendWA = async (phone: string | null | undefined, message: string, label: 
 const guard = (label: string, fn: () => Promise<unknown>) =>
     fn().catch(err => console.error(`[order-events] ${label} failed:`, err));
 
-export const onOrderCreated = (order: { id: number; public_token?: string; customer_name: string; customer_phone: string; pickup_date: string; pickup_time?: string | null; items: OrderItemLike[]; doku_payment_url?: string | null }) =>
+export const onOrderCreated = (order: { id: number; public_token?: string; customer_name: string; customer_phone: string; pickup_date: string; pickup_time?: string | null; items: OrderItemLike[]; doku_payment_url?: string | null; delivery_fee?: number | null }) =>
     guard(`created #${order.id}`, async () => {
         sendPushToAll({
             title: '🛍️ Order Baru Masuk!',
@@ -45,9 +45,10 @@ export const onOrderCreated = (order: { id: number; public_token?: string; custo
         await sendWA(order.customer_phone, buildNewOrderMessage({
             customer_name: order.customer_name,
             order_id: order.id,
-            order_details: order.items.map(p => `- ${p.qty}x ${boxLabel(p.box_type)} (${p.name})`).join('\n'),
+            order_details: order.items.map(p => `- ${p.qty}x ${boxLabel(p.box_type)} (${p.name})`).join('\n')
+                + (order.delivery_fee ? `\n- Ongkir Rp ${Number(order.delivery_fee).toLocaleString('id-ID')}` : ''),
             total_box: order.items.reduce((sum, p) => sum + p.qty, 0),
-            total_amount: order.items.reduce((sum, p) => sum + p.qty * boxPrice(p), 0).toLocaleString('id-ID'),
+            total_amount: (order.items.reduce((sum, p) => sum + p.qty * boxPrice(p), 0) + Number(order.delivery_fee ?? 0)).toLocaleString('id-ID'),
             // Link by public_token (not the sequential id) so other customers' orders can't be guessed.
             upload_link: `${process.env.FRONTEND_URL || 'http://localhost:3001'}/bukti-transfer/${order.public_token ?? order.id}`,
             payment_link: order.doku_payment_url,
@@ -66,9 +67,6 @@ export const onOrderStatusChanged = (order: any, previousStatus: string) =>
                 order_id: order.id,
                 scheduleDate,
             }), 'PAID');
-
-            await createBiteshipDispatch(order).catch(err =>
-                console.error(`[Biteship] Failed to auto-create dispatch for Order #${order.id}:`, err?.message ?? err));
         }
 
         if (order.status === 'DONE') {
@@ -76,6 +74,10 @@ export const onOrderStatusChanged = (order: any, previousStatus: string) =>
                 customer_name: order.customer_name,
                 order_id: order.id,
             }), 'DONE');
+
+            // Store delivery: the order is ready → book the courier now (idempotent per order).
+            await createBiteshipDispatch(order).catch(err =>
+                console.error(`[Biteship] Failed to auto-create dispatch for Order #${order.id}:`, err?.message ?? err));
         }
     });
 

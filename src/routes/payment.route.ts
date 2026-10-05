@@ -3,12 +3,24 @@ import { sendError } from '../utils/errors';
 import { isDokuEnabled } from '../utils/doku';
 import { handleDokuNotification, syncDokuPayment } from '../services/doku.service';
 import { getPublicOrder } from '../services/order.service';
+import { isBiteshipEnabled } from '../services/biteship.service';
 
 const router = Router();
 
-// Tells the order form which payment flow to show (DOKU checkout vs. manual TRANSFER/QRIS/CASH).
+// Which payment methods the customer order form offers.
+//   doku_enabled:     DOKU_PAYMENT=true → DOKU checkout (QRIS) replaces manual QRIS.
+//   transfer_enabled: TRANSFER_PAYMENT=false hides bank transfer (on by default).
+//   biteship_enabled: BITESHIP_ENABLED=true → the form may offer Store Delivery; whether it does for a
+//                     customer depends on BITESHIP_WHITELIST (POST /api/biteship/eligibility).
 router.get('/payment/config', (_req, res) => {
-    res.json({ status: 'ok', data: { doku_enabled: isDokuEnabled() } });
+    res.json({
+        status: 'ok',
+        data: {
+            doku_enabled: isDokuEnabled(),
+            transfer_enabled: process.env.TRANSFER_PAYMENT !== 'false',
+            biteship_enabled: isBiteshipEnabled(),
+        },
+    });
 });
 
 // DOKU HTTP notification. Set this URL in DOKU Back Office (or DOKU_NOTIFICATION_URL).

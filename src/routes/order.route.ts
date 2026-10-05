@@ -38,7 +38,8 @@ router.post('/order', orderLimiter, async (req, res) => {
         const {
             customer_name, customer_phone, pesanan, pickup_date, pickup_time,
             note, payment_method, store_id,
-            delivery_method, delivery_lat, delivery_lng, delivery_address, delivery_driver_note, delivery_area_id
+            delivery_method, delivery_lat, delivery_lng, delivery_address, delivery_driver_note, delivery_area_id,
+            delivery_courier_company, delivery_courier_type
         } = req.body;
 
         if (!customer_name || !customer_phone || !pesanan || !pickup_date || !store_id) {
@@ -56,7 +57,8 @@ router.post('/order', orderLimiter, async (req, res) => {
 
         const order = await createOrder({
             customer_name, customer_phone, pesanan, pickup_date, pickup_time, note, payment_method, store_id,
-            delivery_method, delivery_lat, delivery_lng, delivery_address, delivery_driver_note, delivery_area_id
+            delivery_method, delivery_lat, delivery_lng, delivery_address, delivery_driver_note, delivery_area_id,
+            delivery_courier_company, delivery_courier_type
         });
         const data = doku ? await startDokuCheckout(order) : order;
 

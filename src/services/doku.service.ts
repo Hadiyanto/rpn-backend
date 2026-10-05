@@ -25,6 +25,10 @@ interface CheckoutOrder {
     customer_name: string;
     customer_phone: string;
     items: { box_type: string; name: string; qty: number; unit_price: number | null; price_variant_id?: number | null }[];
+    /** Store delivery shipping fee, charged on top of the items. */
+    delivery_fee?: number | null;
+    delivery_courier_company?: string | null;
+    delivery_courier_type?: string | null;
 }
 
 const frontendUrl = () => process.env.FRONTEND_URL || 'http://localhost:3000';
@@ -36,8 +40,12 @@ const paymentMethodTypes = () =>
 /** Unique per checkout attempt (DOKU rejects reused invoice numbers); letters, digits and '-' only. */
 const newInvoiceNumber = (orderId: number) => `RPN-${orderId}-${Date.now().toString(36).toUpperCase()}`;
 
-const orderAmount = (items: CheckoutOrder['items']) =>
+const itemsAmount = (items: CheckoutOrder['items']) =>
     items.reduce((sum, i) => sum + i.qty * Number(i.unit_price ?? 0), 0);
+
+/** What the customer pays on DOKU: the items plus the store delivery fee, if any. */
+const payableAmount = (itemsTotal: number, deliveryFee: number | null | undefined) =>
+    Math.round(itemsTotal + Number(deliveryFee ?? 0));
 
 /**
  * Creates the DOKU checkout page for a freshly created order and stores its link on the order.
@@ -46,7 +54,8 @@ const orderAmount = (items: CheckoutOrder['items']) =>
  */
 export const startDokuCheckout = async <T extends CheckoutOrder>(order: T) => {
     try {
-        const amount = orderAmount(order.items);
+        const amount = payableAmount(itemsAmount(order.items), order.delivery_fee);
+        const deliveryFee = Math.round(Number(order.delivery_fee ?? 0));
         if (amount <= 0) throw new AppError(400, 'Total pesanan harus lebih dari 0 untuk pembayaran online');
 
         const invoiceNumber = newInvoiceNumber(order.id);
@@ -68,7 +77,14 @@ export const startDokuCheckout = async <T extends CheckoutOrder>(order: T) => {
                     // Box type + the flavor that set the price, e.g. FULL-6.
                     sku: `${i.box_type}${i.price_variant_id ? `-${i.price_variant_id}` : ''}`,
                     category: 'food-and-beverage',
-                })),
+                })).concat(deliveryFee > 0 ? [{
+                    id: String(order.items.length + 1).padStart(3, '0'),
+                    name: `Ongkir (${[order.delivery_courier_company, order.delivery_courier_type].filter(Boolean).join(' ') || 'Store Delivery'})`.slice(0, 255),
+                    quantity: 1,
+                    price: deliveryFee,
+                    sku: 'DELIVERY',
+                    category: 'transportation',
+                }] : []),
             },
             payment: {
                 payment_due_date: paymentDueMinutes(),
@@ -128,8 +144,9 @@ const applyDokuStatus = async (
 
     if (status === 'SUCCESS') {
         const order = await getOrderById(row.id);
-        if (amount !== undefined && Math.round(amount) !== Math.round(Number(order.total_amount))) {
-            console.error(`[DOKU] amount mismatch for order #${row.id}: paid ${amount}, order total ${order.total_amount}`);
+        const expected = payableAmount(Number(order.total_amount), order.delivery_fee);
+        if (amount !== undefined && Math.round(amount) !== expected) {
+            console.error(`[DOKU] amount mismatch for order #${row.id}: paid ${amount}, expected ${expected}`);
             return 'ignored';
         }
 

@@ -1,6 +1,7 @@
 import { UpstreamError } from './errors';
 
-const BASE_URL = process.env.BITESHIP_BASE_URL || 'https://api-sandbox.biteship.com/v1';
+// Biteship has a single host; a biteship_test_… key makes calls sandbox calls.
+const BASE_URL = process.env.BITESHIP_BASE_URL || 'https://api.biteship.com/v1';
 const API_KEY = process.env.BITESHIP_KEY || '';
 
 function getHeaders() {
