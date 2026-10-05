@@ -32,7 +32,7 @@ const sendWA = async (phone: string | null | undefined, message: string, label: 
 const guard = (label: string, fn: () => Promise<unknown>) =>
     fn().catch(err => console.error(`[order-events] ${label} failed:`, err));
 
-export const onOrderCreated = (order: { id: number; public_token?: string; customer_name: string; customer_phone: string; pickup_date: string; pickup_time?: string | null; items: OrderItemLike[] }) =>
+export const onOrderCreated = (order: { id: number; public_token?: string; customer_name: string; customer_phone: string; pickup_date: string; pickup_time?: string | null; items: OrderItemLike[]; doku_payment_url?: string | null }) =>
     guard(`created #${order.id}`, async () => {
         sendPushToAll({
             title: '🛍️ Order Baru Masuk!',
@@ -50,6 +50,7 @@ export const onOrderCreated = (order: { id: number; public_token?: string; custo
             total_amount: order.items.reduce((sum, p) => sum + p.qty * boxPrice(p), 0).toLocaleString('id-ID'),
             // Link by public_token (not the sequential id) so other customers' orders can't be guessed.
             upload_link: `${process.env.FRONTEND_URL || 'http://localhost:3001'}/bukti-transfer/${order.public_token ?? order.id}`,
+            payment_link: order.doku_payment_url,
         }), 'NEW');
     });
 

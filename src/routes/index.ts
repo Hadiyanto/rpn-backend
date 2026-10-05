@@ -23,6 +23,7 @@ import variantRecipeRoute from './variantRecipe.route';
 import setupRoute from './setup.route';
 import packagingRoute from './packaging.route';
 import variantPriceRoute from './variantPrice.route';
+import paymentRoute from './payment.route';
 
 const router = Router();
 
@@ -49,6 +50,7 @@ router.use(variantRecipeRoute);
 router.use(setupRoute);
 router.use(packagingRoute);
 router.use(variantPriceRoute);
+router.use(paymentRoute);
 
 export default router;
 

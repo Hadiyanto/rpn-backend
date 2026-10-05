@@ -5,6 +5,8 @@ import { createOrder, getOrders, getOrderById, changeOrderStatus, updatePaymentM
 import { onOrderCreated, onOrderStatusChanged, onTransferUploaded } from '../services/orderEvents.service';
 import { recalculateOrderStock } from '../services/stockDeduction.service';
 import { quoteOrder } from '../services/variantPrice.service';
+import { startDokuCheckout } from '../services/doku.service';
+import { isDokuEnabled } from '../utils/doku';
 
 const router = Router();
 
@@ -44,10 +46,19 @@ router.post('/order', orderLimiter, async (req, res) => {
             return;
         }
 
-        const data = await createOrder({
+        // payment_method DOKU (offered instead of QRIS when DOKU_PAYMENT=true): the order is paid on the
+        // DOKU checkout page; the response carries payment_url (customer form redirects, admin form shows it).
+        const doku = payment_method === 'DOKU';
+        if (doku && !isDokuEnabled()) {
+            res.status(400).json({ status: 'error', message: 'Pembayaran online sedang tidak tersedia' });
+            return;
+        }
+
+        const order = await createOrder({
             customer_name, customer_phone, pesanan, pickup_date, pickup_time, note, payment_method, store_id,
             delivery_method, delivery_lat, delivery_lng, delivery_address, delivery_driver_note, delivery_area_id
         });
+        const data = doku ? await startDokuCheckout(order) : order;
 
         // Push + WhatsApp run in the background; they never affect the response.
         void onOrderCreated(data);

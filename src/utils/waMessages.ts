@@ -10,13 +10,25 @@ export function buildNewOrderMessage(params: {
     total_box: number;
     total_amount: string;
     upload_link: string;
+    /** DOKU checkout link (DOKU_PAYMENT=true): replaces the bank account + upload instructions. */
+    payment_link?: string | null;
 }): string {
-    const { customer_name, order_details, total_box, total_amount, upload_link } = params;
-    return (
+    const { customer_name, order_details, total_box, total_amount, upload_link, payment_link } = params;
+    const header =
         `Hai ${customer_name}, pesanannya sudah diterima ya.\n\n` +
         `Detail Pesanan:\n${order_details}\n\n` +
         `Jumlah: ${total_box} box\n` +
-        `Total: Rp ${total_amount}\n\n` +
+        `Total: Rp ${total_amount}\n\n`;
+    if (payment_link) {
+        return (
+            header +
+            `Silakan selesaikan pembayaran melalui link berikut:\n${payment_link}\n\n` +
+            `Status pesanan bisa dicek di:\n${upload_link}\n\n` +
+            `Terima kasih,\nRaja Pisang Nugget`
+        );
+    }
+    return (
+        header +
         `Pembayaran bisa melalui:\n` +
         `Bank: BCA\nNo Rek: 1280119748\nA/N: Anggita Prima\n\n` +
         `Mohon konfirmasi bukti pembayarannya melalui link berikut:\n${upload_link}\n\n` +

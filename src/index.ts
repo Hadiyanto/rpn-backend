@@ -46,7 +46,10 @@ app.use(cors({
     credentials: true,
 }));
 
-app.use(express.json());
+// Keep the raw body too: DOKU notification signatures are computed over the exact bytes sent.
+app.use(express.json({
+    verify: (req, _res, buf) => { (req as express.Request & { rawBody?: Buffer }).rawBody = buf; },
+}));
 
 app.use('/', healthRouter);
 app.use('/api', apiRoutes);

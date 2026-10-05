@@ -481,6 +481,12 @@ export const getPublicOrder = async (token: string) => {
         store_id: order.store_id,
         has_transfer_img: !!order.transfer_img_url,
         total_amount: Number(order.total_amount),
+        // DOKU checkout link, only while it can still be paid.
+        payment_url: order.payment_method === 'DOKU' && order.status === 'UNPAID'
+            && (!order.doku_expired_at || new Date(order.doku_expired_at) > new Date())
+            ? order.doku_payment_url ?? null
+            : null,
+        payment_expired_at: order.doku_expired_at ?? null,
         items: order.items.map((i: { box_type: string; name: string; qty: number; unit_price: number | null }) => ({
             box_type: i.box_type, name: i.name, qty: i.qty, unit_price: i.unit_price === null ? null : Number(i.unit_price),
         })),
