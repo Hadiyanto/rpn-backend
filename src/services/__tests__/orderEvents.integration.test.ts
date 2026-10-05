@@ -53,7 +53,7 @@ describe.skipIf(!hasTestDb)('order events: WhatsApp + idempotent Biteship dispat
                 { courier_code: 'grab', courier_service_code: 'same_day', price: 19000 },
                 { courier_code: 'lalamove', courier_service_code: 'motorcycle', price: 22200 },
             ] }
-            : { id: 'bs-123' });
+            : { id: 'bs-123', courier: { link: 'https://track.biteship.com/abc' } });
         sendMessage.mockClear();
         await db.pool.query('TRUNCATE orders, order_items, daily_quota, menu RESTART IDENTITY CASCADE');
         await db.pool.query(`INSERT INTO menu (name, price) VALUES ('FULL', 65000), ('HALF', 35000)`);
@@ -119,6 +119,12 @@ describe.skipIf(!hasTestDb)('order events: WhatsApp + idempotent Biteship dispat
         expect(payload.delivery_date).toBeUndefined();
         expect(payload.items[0]).toMatchObject({ value: 65000, quantity: 2 });
         expect((await orders.getOrderById(order.id)).biteship_order_id).toBe('bs-123');
+
+        // WhatsApp: PAID without pickup instructions; DONE with the courier + tracking link.
+        const messages = sendMessage.mock.calls.map(c => String((c as unknown[])[1]));
+        expect(messages.some(m => m.includes('akan kami kirim sesuai jadwal') && m.includes('Grab Instant') && !m.includes('pick up'))).toBe(true);
+        expect(messages.at(-1)).toContain('sedang dikirim dengan *Grab Instant*');
+        expect(messages.at(-1)).toContain('https://track.biteship.com/abc');
 
         // DONE → CONFIRMED → DONE must not create a second shipment.
         await setStatus(order.id, 'CONFIRMED');

@@ -104,7 +104,7 @@ export const getStoreDeliveryOptions = async (params: {
 const CLAIM = 'PENDING';
 
 type DispatchResult =
-    | { status: 'created'; biteship_order_id: string }
+    | { status: 'created'; biteship_order_id: string; tracking_link: string | null }
     | { status: 'skipped'; reason: string };
 
 /** Atomically claims the order for dispatch. Returns false if it was already dispatched/claimed. */
@@ -202,7 +202,7 @@ export const createBiteshipDispatch = async (order: any): Promise<DispatchResult
         const biteshipOrderId = String(created?.id ?? created?.order_id ?? 'UNKNOWN');
         await pool.query('UPDATE orders SET biteship_order_id = $2 WHERE id = $1', [order.id, biteshipOrderId]);
         console.log(`[Biteship] Auto-created order ${biteshipOrderId} for RPN #${order.id}`);
-        return { status: 'created', biteship_order_id: biteshipOrderId };
+        return { status: 'created', biteship_order_id: biteshipOrderId, tracking_link: created?.courier?.link ?? null };
     } catch (err) {
         // Nothing was created (or we can't tell) — release so an admin can retry by setting PAID again.
         await releaseClaim(order.id).catch(() => undefined);

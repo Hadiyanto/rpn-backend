@@ -9,6 +9,9 @@ import {
     buildNewOrderMessage,
     buildPaidOrderMessage,
     buildDoneOrderMessage,
+    buildDeliveryDispatchedMessage,
+    courierLabel,
+    type DeliveryInfo,
     buildTransferReceivedMessage,
 } from '../utils/waMessages';
 
@@ -29,10 +32,22 @@ const sendWA = async (phone: string | null | undefined, message: string, label: 
     await wa.sendMessage(formatWAPhone(phone), message).catch(err => console.error(`Auto WA Send Error on ${label}:`, err));
 };
 
+/** Courier + address for store-delivery orders; null for pickup. */
+const deliveryInfo = (order: {
+    delivery_method?: string | null; delivery_address?: string | null;
+    delivery_courier_company?: string | null; delivery_courier_type?: string | null;
+}): DeliveryInfo | null => order.delivery_method === 'store_delivery'
+    ? { courier: courierLabel(order.delivery_courier_company, order.delivery_courier_type), address: order.delivery_address ?? '-' }
+    : null;
+
+const schedule = (order: { pickup_date: string; pickup_time?: string | null }) =>
+    `${formatDateID(order.pickup_date)}${order.pickup_time ? ' jam ' + order.pickup_time : ''}`;
+
 const guard = (label: string, fn: () => Promise<unknown>) =>
     fn().catch(err => console.error(`[order-events] ${label} failed:`, err));
 
-export const onOrderCreated = (order: { id: number; public_token?: string; customer_name: string; customer_phone: string; pickup_date: string; pickup_time?: string | null; items: OrderItemLike[]; doku_payment_url?: string | null; delivery_fee?: number | null }) =>
+export const onOrderCreated = (order: { id: number; public_token?: string; customer_name: string; customer_phone: string; pickup_date: string; pickup_time?: string | null; items: OrderItemLike[]; doku_payment_url?: string | null; delivery_fee?: number | null;
+    delivery_method?: string | null; delivery_address?: string | null; delivery_courier_company?: string | null; delivery_courier_type?: string | null }) =>
     guard(`created #${order.id}`, async () => {
         sendPushToAll({
             title: '🛍️ Order Baru Masuk!',
@@ -52,6 +67,7 @@ export const onOrderCreated = (order: { id: number; public_token?: string; custo
             // Link by public_token (not the sequential id) so other customers' orders can't be guessed.
             upload_link: `${process.env.FRONTEND_URL || 'http://localhost:3001'}/bukti-transfer/${order.public_token ?? order.id}`,
             payment_link: order.doku_payment_url,
+            delivery: (() => { const d = deliveryInfo(order); return d ? { ...d, schedule: schedule(order) } : null; })(),
         }), 'NEW');
     });
 
@@ -60,24 +76,37 @@ export const onOrderStatusChanged = (order: any, previousStatus: string) =>
     guard(`status #${order.id} ${previousStatus}→${order.status}`, async () => {
         if (order.status === previousStatus) return;
 
+        const delivery = deliveryInfo(order);
+
         if (order.status === 'PAID') {
-            const scheduleDate = `${formatDateID(order.pickup_date)}${order.pickup_time ? ' jam ' + order.pickup_time : ''}`;
             await sendWA(order.customer_phone, buildPaidOrderMessage({
                 customer_name: order.customer_name,
                 order_id: order.id,
-                scheduleDate,
+                scheduleDate: schedule(order),
+                delivery,
             }), 'PAID');
         }
 
-        if (order.status === 'DONE') {
+        if (order.status === 'DONE' && !delivery) {
             await sendWA(order.customer_phone, buildDoneOrderMessage({
                 customer_name: order.customer_name,
                 order_id: order.id,
             }), 'DONE');
+        }
 
-            // Store delivery: the order is ready → book the courier now (idempotent per order).
-            await createBiteshipDispatch(order).catch(err =>
-                console.error(`[Biteship] Failed to auto-create dispatch for Order #${order.id}:`, err?.message ?? err));
+        if (order.status === 'DONE' && delivery) {
+            // Store delivery: the order is ready → book the courier now (idempotent per order), then
+            // tell the customer, with Biteship's tracking link when the booking just went through.
+            const dispatch = await createBiteshipDispatch(order).catch(err => {
+                console.error(`[Biteship] Failed to auto-create dispatch for Order #${order.id}:`, err?.message ?? err);
+                return null;
+            });
+            await sendWA(order.customer_phone, buildDeliveryDispatchedMessage({
+                customer_name: order.customer_name,
+                order_id: order.id,
+                courier: delivery.courier,
+                tracking_link: dispatch?.status === 'created' ? dispatch.tracking_link : null,
+            }), 'DONE delivery');
         }
     });
 
