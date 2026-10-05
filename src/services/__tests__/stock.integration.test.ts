@@ -41,6 +41,48 @@ describe.skipIf(!hasTestDb)('stock & recipe services (local Postgres)', () => {
         expect(await stock.getStocks(2)).toEqual([]);
     });
 
+    it('a backdated stock-in re-runs the history: later balances and costs follow', async () => {
+        // 27 Sep: 1000 g @ Rp 80; 29 Sep: 500 g used. Then the forgotten 28 Sep purchase: 1000 g @ Rp 100.
+        const s = await stock.createStock({ item_name: 'Oreo', unit: 'gram', store_id: 1, qty: 0 });
+        await stock.adjustStock({ stock_id: s.id, qty_change: 1000, type: 'IN', total_price: 80000, created_at: '2026-09-27T01:00:00Z' });
+        await stock.adjustStock({ stock_id: s.id, qty_change: -500, type: 'OUT', created_at: '2026-09-29T01:00:00Z' });
+        const updated = await stock.adjustStock({ stock_id: s.id, qty_change: 1000, type: 'IN', total_price: 100000, created_at: '2026-09-28T01:00:00Z' });
+
+        expect(updated).toMatchObject({ qty: 1500, price_per_unit: 90 });
+        const out = (await stock.getStockHistory(s.id)).find(h => Number(h.qty_change) === -500)!;
+        expect(out).toMatchObject({ final_qty: 1500, unit_cost: 90 }); // was 500 @ 80 before the backdated purchase
+    });
+
+    it('editing a manual movement re-runs the history; dates are kept as entered', async () => {
+        const s = await stock.createStock({ item_name: 'Keju', unit: 'gram', store_id: 1, qty: 0 });
+        await stock.adjustStock({ stock_id: s.id, qty_change: 2000, type: 'IN', total_price: 206000, created_at: '2026-09-27T01:00:00Z' });
+        await stock.adjustStock({ stock_id: s.id, qty_change: -3000, type: 'OUT', created_at: '2026-09-30T01:00:00Z' });
+        const initial = (await stock.getStockHistory(s.id)).find(h => Number(h.qty_change) === 2000)!;
+        expect(initial.created_at_iso).toBe('2026-09-27T01:00:00Z');
+
+        const fixed = await stock.updateStockMovement(initial.id, { qty: 8000, total_price: 600000 });
+        expect(fixed).toMatchObject({ qty: 5000, price_per_unit: 75 });
+        const out = (await stock.getStockHistory(s.id)).find(h => Number(h.qty_change) === -3000)!;
+        expect(out).toMatchObject({ final_qty: 5000, unit_cost: 75 });
+
+        await expect(stock.adjustStock({ stock_id: s.id, qty_change: 1, type: 'IN', created_at: '2999-01-01T00:00:00Z' }))
+            .rejects.toThrow(/masa depan/);
+    });
+
+    it('history report: opening + in − out = closing for a WIB date range', async () => {
+        const s = await stock.createStock({ item_name: 'Vanila', unit: 'gram', store_id: 1, qty: 0 });
+        await stock.adjustStock({ stock_id: s.id, qty_change: 1000, type: 'IN', created_at: '2026-09-27T01:00:00Z' }); // 27 Sep 08:00 WIB
+        await stock.adjustStock({ stock_id: s.id, qty_change: -100, type: 'OUT', created_at: '2026-09-29T18:00:00Z' }); // 30 Sep 01:00 WIB
+        await stock.adjustStock({ stock_id: s.id, qty_change: 300, type: 'IN', created_at: '2026-09-30T10:00:00Z' });   // 30 Sep 17:00 WIB
+        await stock.adjustStock({ stock_id: s.id, qty_change: -50, type: 'OUT', created_at: '2026-09-30T18:00:00Z' });  // 1 Okt 01:00 WIB
+
+        const r = await stock.getStockHistoryReport(s.id, '2026-09-30', '2026-09-30');
+        expect(r.ledger).toMatchObject({ opening: 1000, total_in: 300, total_out: 100, out_manual: 100, closing: 1200, orders: 0 });
+        expect(r.movements).toHaveLength(2);
+        expect(r.sales).toMatchObject({ orders: 0, usage: 0 });
+        await expect(stock.getStockHistoryReport(s.id, '2026-10-02', '2026-10-01')).rejects.toThrow(/Rentang/);
+    });
+
     it('refuses a duplicate item name in the same store, allows it in another', async () => {
         await stock.createStock({ item_name: 'Cokelat', unit: 'gram', store_id: 1 });
         await expect(stock.createStock({ item_name: ' cokelat ', unit: 'gram', store_id: 1 })).rejects.toMatchObject({ status: 409 });
