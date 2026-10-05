@@ -55,6 +55,23 @@ DATABASE_URL=postgres://localhost/rpn_migration_test node node_modules/.bin/node
 
 Run with `npx ts-node scripts/<name>.ts` (uses `.env`, i.e. production if that's what it points to).
 
+## Database backup (pg-backup)
+
+`tools/db-backup/` — a container that `pg_dump`s the database (`DOCKER_DATABASE_URL`) every hour into
+`backups/` and a **private** Cloudflare R2 bucket, optionally restoring each backup into Supabase.
+Configure it in `tools/db-backup/.env` (copy `.env.example`), then on the server:
+
+```bash
+docker compose --profile backup up -d --build pg-backup   # hourly backups
+docker compose run --rm pg-backup once                    # one backup now
+docker compose run --rm pg-backup r2-list                 # backups in R2
+docker compose run --rm pg-backup r2-get backups/2026/10/<file>.dump
+docker compose run --rm pg-backup restore /backups/<file>.dump <postgres-url>
+```
+
+Local backups older than `BACKUP_KEEP_DAYS` (14) are deleted, keeping the latest 3; expiry in R2 is a
+lifecycle rule on the bucket. A restore runs in one transaction and refuses to target the source DB.
+
 ## Redis keys
 
 The Upstash instance is **shared with other apps**, so every RPN key lives under `rpn:` and is

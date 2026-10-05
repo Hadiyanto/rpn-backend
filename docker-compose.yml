@@ -35,6 +35,27 @@ services:
       - backend
     restart: unless-stopped
 
+  # Backup pg_dump berkala (sumber: DOCKER_DATABASE_URL di .env) ke ${BACKUP_DIR} dan bucket R2
+  # privat (R2_BACKUP_BUCKET di tools/db-backup/.env) + restore opsional ke Supabase. Profile backup:
+  #   docker compose --profile backup up -d --build pg-backup
+  #   docker compose run --rm pg-backup once | list | r2-list | r2-get <key> | restore <file> [url]
+  pg-backup:
+    build:
+      context: ./tools/db-backup
+    container_name: rpn-pg-backup
+    profiles: ["backup"]
+    restart: unless-stopped
+    command: ["loop"]
+    env_file:
+      - path: ./tools/db-backup/.env
+        required: false
+    environment:
+      DATABASE_URL: ${DOCKER_DATABASE_URL:?add DOCKER_DATABASE_URL to rpn-backend/.env (see top of docker-compose.yml)}
+    volumes:
+      - ${BACKUP_DIR:-./backups}:/backups
+    networks:
+      - backend
+
 networks:
   backend:
     # Created by the shared Postgres compose (networks.backend.name: backend).
