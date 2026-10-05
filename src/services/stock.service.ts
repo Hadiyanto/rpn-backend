@@ -317,6 +317,11 @@ export const getStockHistory = async (stockId: number) => {
 
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 
+// Movements booked by orders. Older ones (before stock_history.order_id, or of orders deleted since)
+// only carry the order in their note: "Order #12" / "Reversal Order #12".
+const ORDER_NOTE_RE = /^(Reversal )?Order #\d+$/;
+const ORDER_MOVEMENT_SQL = `(order_id IS NOT NULL OR notes ~ '^(Reversal )?Order #[0-9]+$')`;
+
 // Order items whose box actually uses stock $1 (same rules as the automatic deduction): its packaging,
 // or — for items with flavors — the store's base recipe or one of its flavors' recipes.
 const ITEM_USES_STOCK_SQL = `(
@@ -371,7 +376,7 @@ export const getStockHistoryReport = async (stockId: number, from: string, to: s
                   + COALESCE((SELECT SUM(qty_change) FROM stock_history WHERE stock_id = s.id AND ${before}), 0) AS opening,
                 COALESCE((SELECT SUM(qty_change) FROM stock_history WHERE stock_id = s.id AND qty_change > 0 AND ${inRange}), 0) AS total_in,
                 COALESCE((SELECT -SUM(qty_change) FROM stock_history WHERE stock_id = s.id AND qty_change < 0 AND ${inRange}), 0) AS total_out,
-                COALESCE((SELECT -SUM(qty_change) FROM stock_history WHERE stock_id = s.id AND qty_change < 0 AND order_id IS NOT NULL AND ${inRange}), 0) AS out_orders
+                COALESCE((SELECT -SUM(qty_change) FROM stock_history WHERE stock_id = s.id AND qty_change < 0 AND ${ORDER_MOVEMENT_SQL} AND ${inRange}), 0) AS out_orders
              FROM stock s WHERE s.id = $1`,
             [stockId, from, to]
         ),
@@ -436,7 +441,7 @@ export const updateStockMovement = async (historyId: number, payload: UpdateMove
     return transaction(async (client) => {
         const { rows: [row] } = await client.query('SELECT * FROM stock_history WHERE id = $1 FOR UPDATE', [historyId]);
         if (!row) throw new NotFoundError(`Riwayat stok dengan id ${historyId} tidak ditemukan`);
-        if (row.order_id !== null) throw new ConflictError('Pergerakan dari order tidak bisa diedit');
+        if (row.order_id !== null || ORDER_NOTE_RE.test(row.notes ?? '')) throw new ConflictError('Pergerakan dari order tidak bisa diedit');
 
         let qtyChange = Number(row.qty_change);
         if (payload.qty !== undefined) {

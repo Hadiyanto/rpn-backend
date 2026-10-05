@@ -67,6 +67,11 @@ describe.skipIf(!hasTestDb)('stock & recipe services (local Postgres)', () => {
 
         await expect(stock.adjustStock({ stock_id: s.id, qty_change: 1, type: 'IN', created_at: '2999-01-01T00:00:00Z' }))
             .rejects.toThrow(/masa depan/);
+
+        // Older order movements only name the order in their note — still not editable.
+        const { rows: [legacy] } = await db.pool.query(
+            `INSERT INTO stock_history (stock_id, type, qty_change, final_qty, notes) VALUES ($1, 'OUT', -10, 0, 'Order #999') RETURNING id`, [s.id]);
+        await expect(stock.updateStockMovement(legacy.id, { qty: 5 })).rejects.toMatchObject({ status: 409 });
     });
 
     it('history report: opening + in − out = closing for a WIB date range', async () => {
