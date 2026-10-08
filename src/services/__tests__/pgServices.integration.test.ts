@@ -98,6 +98,15 @@ describe.skipIf(!hasTestDb)('services on pg (shape parity & behaviour)', () => {
         expect(preview).toMatchObject({ totalBoxesRaw: 20.5, totalBoxesRounded: 21, totalSalary: 181000 });
         expect(preview.breakdown.map(l => l.amount)).toEqual([150000, 25000, 6000]);
 
+        expect(preview.box_sources).toEqual([{ store_id: 1, store_name: 'RPN Store Pancoran', boxes: 20.5 }]);
+
+        // Counting store 2's boxes too (4 FULL): 24.5 → 25 → 150.000 + 25.000 + 30.000; tiers stay store 1's.
+        const both = await salary.calculateSalaryPreview('2099-01-05', 1, [2, 1]);
+        expect(both).toMatchObject({ totalBoxesRaw: 24.5, totalBoxesRounded: 25, totalSalary: 205000 });
+        expect(both.box_sources.map(b => [b.store_id, b.boxes])).toEqual([[1, 20.5], [2, 4]]);
+        await expect(salary.calculateSalaryPreview('2099-01-05', 1, [])).rejects.toMatchObject({ status: 400 });
+        expect((await salary.generateDailySalary('2099-01-05', 1, [1, 2])).box_sources).toHaveLength(2);
+
         await salary.generateDailySalary('2099-01-05', 1);
         const saved = await salary.generateDailySalary('2099-01-05', 1);
         expect(saved).toMatchObject({ date: '2099-01-05', store_id: 1, total_boxes: 21, total_salary: 181000 });

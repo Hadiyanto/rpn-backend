@@ -125,23 +125,49 @@ export const getDailySalaries = async (storeId?: number) => {
     return rows;
 };
 
-export const calculateSalaryPreview = async (date: string, storeId: number, db: Queryable = pool) => {
+export interface BoxSource {
+    store_id: number;
+    store_name: string;
+    /** Box units (HALF = 0.5) of PAID/DONE orders picked up that day. */
+    boxes: number;
+}
+
+/** Stores whose boxes count towards the salary; default = the salary's own store. */
+const parseBoxStoreIds = (storeId: number, raw: unknown): number[] => {
+    if (raw === undefined || raw === null) return [storeId];
+    if (!Array.isArray(raw) || raw.length === 0) throw new ValidationError('Pilih minimal 1 store untuk total box');
+    const ids = [...new Set(raw.map(Number))];
+    if (ids.some(id => !Number.isInteger(id) || id < 1)) throw new ValidationError('box_store_ids tidak valid');
+    return ids.sort((a, b) => a - b);
+};
+
+/**
+ * Salary for `storeId` (its tiers, its expense) on `date`, from the boxes sold that day by the
+ * stores in `boxStoreIds` (default: just `storeId`).
+ */
+export const calculateSalaryPreview = async (date: string, storeId: number, boxStoreIdsRaw?: unknown, db: Queryable = pool) => {
     assertStore(storeId);
-    const { rows: [sum] } = await db.query(`
-        SELECT COALESCE(SUM(${BOX_UNITS_SQL}), 0) AS total_boxes
-        FROM orders o
-        JOIN order_items oi ON oi.order_id = o.id
-        WHERE o.pickup_date = $1::date
-          AND o.store_id = $2
-          AND o.status IN ('PAID', 'DONE')
-    `, [date, storeId]);
-    const totalBoxes = Number(sum.total_boxes);
+    const boxStoreIds = parseBoxStoreIds(storeId, boxStoreIdsRaw);
+    const { rows } = await db.query(`
+        SELECT s.id AS store_id, s.name AS store_name, COALESCE(SUM(${BOX_UNITS_SQL}), 0) AS boxes
+        FROM stores s
+        LEFT JOIN orders o ON o.store_id = s.id AND o.pickup_date = $1::date AND o.status IN ('PAID', 'DONE')
+        LEFT JOIN order_items oi ON oi.order_id = o.id
+        WHERE s.id = ANY($2::int[])
+        GROUP BY s.id, s.name
+        ORDER BY s.id
+    `, [date, boxStoreIds]);
+    if (rows.length !== boxStoreIds.length) throw new ValidationError('Store untuk total box tidak ditemukan');
+    const boxSources: BoxSource[] = rows.map(r => ({ store_id: r.store_id, store_name: r.store_name, boxes: Number(r.boxes) }));
+
+    const totalBoxes = boxSources.reduce((sum, b) => sum + b.boxes, 0);
     const boxCountInt = Math.ceil(totalBoxes);
     const result = computeSalary(await loadTiers(storeId, db), boxCountInt);
 
     return {
         date,
         store_id: storeId,
+        box_sources: boxSources,
         totalBoxesRaw: totalBoxes,
         totalBoxesRounded: boxCountInt,
         totalSalary: result.total,
@@ -153,17 +179,17 @@ export const calculateSalaryPreview = async (date: string, storeId: number, db: 
  * Saves the day's salary for a store and books it as that store's expense ("Gaji"), linked by
  * daily_salary_id, so regenerating updates the same expense instead of adding another.
  */
-export const generateDailySalary = async (date: string, storeId: number) =>
+export const generateDailySalary = async (date: string, storeId: number, boxStoreIds?: unknown) =>
     transaction(async (client) => {
-        const preview = await calculateSalaryPreview(date, storeId, client);
+        const preview = await calculateSalaryPreview(date, storeId, boxStoreIds, client);
         const { rows: [saved] } = await client.query(`
-            INSERT INTO daily_salary (date, store_id, total_boxes, total_salary, breakdown, updated_at)
-            VALUES ($1, $2, $3, $4, $5, CURRENT_TIMESTAMP)
+            INSERT INTO daily_salary (date, store_id, total_boxes, total_salary, breakdown, box_sources, updated_at)
+            VALUES ($1, $2, $3, $4, $5, $6, CURRENT_TIMESTAMP)
             ON CONFLICT (date, store_id) DO UPDATE
             SET total_boxes = EXCLUDED.total_boxes, total_salary = EXCLUDED.total_salary,
-                breakdown = EXCLUDED.breakdown, updated_at = CURRENT_TIMESTAMP
+                breakdown = EXCLUDED.breakdown, box_sources = EXCLUDED.box_sources, updated_at = CURRENT_TIMESTAMP
             RETURNING *
-        `, [date, storeId, preview.totalBoxesRounded, preview.totalSalary, JSON.stringify(preview.breakdown)]);
+        `, [date, storeId, preview.totalBoxesRounded, preview.totalSalary, JSON.stringify(preview.breakdown), JSON.stringify(preview.box_sources)]);
 
         const { rows: [store] } = await client.query('SELECT name FROM stores WHERE id = $1', [storeId]);
         if (preview.totalSalary > 0) {

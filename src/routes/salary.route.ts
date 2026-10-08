@@ -45,23 +45,24 @@ router.get('/daily-salary', async (req, res) => {
     }
 });
 
-// POST /daily-salary/preview  { date, store_id }
+// POST /daily-salary/preview  { date, store_id, box_store_ids? } — box_store_ids: stores whose boxes
+// count (default [store_id]); tiers and expense stay those of store_id.
 router.post('/daily-salary/preview', async (req, res) => {
     try {
-        const { date, store_id } = req.body ?? {};
+        const { date, store_id, box_store_ids } = req.body ?? {};
         if (!date) return res.status(400).json({ status: 'error', message: 'Tanggal wajib diisi (YYYY-MM-DD)' });
-        res.json({ status: 'ok', data: await calculateSalaryPreview(date, Number(store_id)) });
+        res.json({ status: 'ok', data: await calculateSalaryPreview(date, Number(store_id), box_store_ids) });
     } catch (e: any) {
         sendError(res, e);
     }
 });
 
-// POST /daily-salary/generate  { date, store_id } → also books the salary as the store's expense
+// POST /daily-salary/generate  { date, store_id, box_store_ids? } → also books the salary as the store's expense
 router.post('/daily-salary/generate', async (req, res) => {
     try {
-        const { date, store_id } = req.body ?? {};
+        const { date, store_id, box_store_ids } = req.body ?? {};
         if (!date) return res.status(400).json({ status: 'error', message: 'Tanggal wajib diisi (YYYY-MM-DD)' });
-        res.json({ status: 'ok', data: await generateDailySalary(date, Number(store_id)) });
+        res.json({ status: 'ok', data: await generateDailySalary(date, Number(store_id), box_store_ids) });
     } catch (e: any) {
         sendError(res, e);
     }
