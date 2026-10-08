@@ -477,3 +477,20 @@ export const updateStockMovement = async (historyId: number, payload: UpdateMove
         return stock;
     });
 };
+
+/**
+ * Deletes a manual movement (wrong or duplicate input) and replays the item's history, so later
+ * balances and order costs follow. Movements made by orders can't be deleted.
+ */
+export const deleteStockMovement = async (historyId: number) =>
+    transaction(async (client) => {
+        const { rows: [row] } = await client.query('SELECT * FROM stock_history WHERE id = $1 FOR UPDATE', [historyId]);
+        if (!row) throw new NotFoundError(`Riwayat stok dengan id ${historyId} tidak ditemukan`);
+        if (row.order_id !== null || ORDER_NOTE_RE.test(row.notes ?? '')) throw new ConflictError('Pergerakan dari order tidak bisa dihapus');
+
+        const opening = await openingBalance(client, row.stock_id);
+        await client.query('DELETE FROM stock_history WHERE id = $1', [historyId]);
+        await rebuildStockLedger(client, row.stock_id, opening);
+        const { rows: [stock] } = await client.query('SELECT * FROM stock WHERE id = $1', [row.stock_id]);
+        return stock;
+    });

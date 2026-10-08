@@ -72,6 +72,15 @@ describe.skipIf(!hasTestDb)('stock & recipe services (local Postgres)', () => {
         const { rows: [legacy] } = await db.pool.query(
             `INSERT INTO stock_history (stock_id, type, qty_change, final_qty, notes) VALUES ($1, 'OUT', -10, 0, 'Order #999') RETURNING id`, [s.id]);
         await expect(stock.updateStockMovement(legacy.id, { qty: 5 })).rejects.toMatchObject({ status: 409 });
+        await expect(stock.deleteStockMovement(legacy.id)).rejects.toMatchObject({ status: 409 });
+        await db.pool.query('DELETE FROM stock_history WHERE id = $1', [legacy.id]);
+
+        // Deleting the corrected purchase: the later OUT now runs from 0 and keeps the last known cost.
+        const afterDelete = await stock.deleteStockMovement(initial.id);
+        expect(afterDelete.qty).toBe(-3000);
+        const remaining = await stock.getStockHistory(s.id);
+        expect(remaining).toHaveLength(1);
+        expect(remaining[0]).toMatchObject({ qty_change: -3000, final_qty: -3000 });
     });
 
     it('history report: opening + in − out = closing for a WIB date range', async () => {

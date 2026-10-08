@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { sendError } from '../utils/errors';
-import { getStocks, createStock, updateStock, deleteStock, adjustStock, getStockHistory, getStockHistoryReport, updateStockMovement } from '../services/stock.service';
+import { getStocks, createStock, updateStock, deleteStock, adjustStock, getStockHistory, getStockHistoryReport, updateStockMovement, deleteStockMovement } from '../services/stock.service';
 
 const router = Router();
 
@@ -69,6 +69,20 @@ router.put('/stocks/history/:historyId', async (req, res) => {
 
 // GET /stocks/:id/history/report?from=YYYY-MM-DD&to=YYYY-MM-DD (WIB, inclusive)
 // → movements in the period + ledger summary + Sales-style (pickup date) summary.
+// Delete a manual movement; the item's history is replayed.
+router.delete('/stocks/history/:historyId', async (req, res) => {
+    try {
+        const historyId = Number(req.params.historyId);
+        if (!Number.isInteger(historyId)) {
+            res.status(400).json({ status: 'error', message: 'id tidak valid' });
+            return;
+        }
+        res.json({ status: 'ok', data: await deleteStockMovement(historyId) });
+    } catch (e: any) {
+        sendError(res, e);
+    }
+});
+
 router.get('/stocks/:id/history/report', async (req, res) => {
     try {
         const data = await getStockHistoryReport(Number(req.params.id), String(req.query.from ?? ''), String(req.query.to ?? ''));
