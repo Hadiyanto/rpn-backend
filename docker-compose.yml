@@ -29,8 +29,9 @@ services:
       # Keep true while another instance (Render) uses the same WhatsApp session.
       WHATSAPP_DISABLED: ${WHATSAPP_DISABLED:-true}
     ports:
-      # Only reachable from the host itself; nginx (infra/nginx/rpn-api.conf) serves it publicly.
-      - "127.0.0.1:${BACKEND_PORT:-4000}:4000"
+      # Host port 3001 (RPN uses 3xxx), 127.0.0.1 only; nginx (setupvps repo: nginx/rpn/) serves it
+      # as https://api.rajapisangnugget.com.
+      - "127.0.0.1:${BACKEND_PORT:-3001}:4000"
     networks:
       - backend
     restart: unless-stopped
