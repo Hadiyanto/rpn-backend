@@ -3,21 +3,28 @@ import { biteshipGet, biteshipPost } from '../utils/biteship';
 import { getStoreById } from './store.service';
 import { getMenuBoxMap, boxShippingItem } from './menu.service';
 import { boxLabel } from '../utils/boxLabel';
-import { formatWAPhone } from '../utils/phone';
+// import { formatWAPhone } from '../utils/phone'; // used by the (disabled) BITESHIP_WHITELIST check
 
-/** BITESHIP_ENABLED=true: Store Delivery via Biteship is used at all (quotes + courier booking). */
-export const isBiteshipEnabled = () => process.env.BITESHIP_ENABLED === 'true';
+/**
+ * Store Delivery via Biteship is always on (quotes + courier booking) — BITESHIP_ENABLED is no longer
+ * read. Kept as a function so it can be switched back to the env flag.
+ */
+export const isBiteshipEnabled = () => true;
+// export const isBiteshipEnabled = () => process.env.BITESHIP_ENABLED === 'true';
 
-/** BITESHIP_WHITELIST: comma-separated phone numbers (any format) — empty means every customer. */
-const biteshipWhitelist = () =>
-    (process.env.BITESHIP_WHITELIST || '').split(',').map(p => formatWAPhone(p.trim())).filter(Boolean);
+// BITESHIP_WHITELIST is no longer checked: every customer may pick Store Delivery.
+// /** BITESHIP_WHITELIST: comma-separated phone numbers (any format) — empty means every customer. */
+// const biteshipWhitelist = () =>
+//     (process.env.BITESHIP_WHITELIST || '').split(',').map(p => formatWAPhone(p.trim())).filter(Boolean);
 
-/** Whether this customer may pick Store Delivery: Biteship on, and their number whitelisted (if a list is set). */
-export const isStoreDeliveryAllowed = (phone: string | null | undefined) => {
-    if (!isBiteshipEnabled()) return false;
-    const whitelist = biteshipWhitelist();
-    return whitelist.length === 0 || (!!phone && whitelist.includes(formatWAPhone(phone)));
-};
+/** Whether this customer may pick Store Delivery: always (no whitelist). */
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
+export const isStoreDeliveryAllowed = (_phone: string | null | undefined) => isBiteshipEnabled();
+// export const isStoreDeliveryAllowed = (phone: string | null | undefined) => {
+//     if (!isBiteshipEnabled()) return false;
+//     const whitelist = biteshipWhitelist();
+//     return whitelist.length === 0 || (!!phone && whitelist.includes(formatWAPhone(phone)));
+// };
 
 // Couriers asked for rates when the client doesn't specify any (instant + same-day coverage).
 export const DEFAULT_RATE_COURIERS = 'gosend,grab,gojek,lalamove,paxel,borzo,sicepat,anteraja,jne,jnt';

@@ -86,7 +86,7 @@ describe.skipIf(!hasTestDb)('order events: WhatsApp + idempotent Biteship dispat
         expect(order).toMatchObject({ delivery_fee: 23000, delivery_courier_company: 'grab', delivery_courier_type: 'instant' });
     });
 
-    it('rejects a courier that is not offered, and customers outside BITESHIP_WHITELIST', async () => {
+    it('rejects a courier that is not offered; any customer may pick Store Delivery (no whitelist)', async () => {
         await expect(orders.createOrder({
             customer_name: 'Budi', customer_phone: '081234567890', pickup_date: date.todayWIB(), pickup_time: '12:00', store_id: 1,
             pesanan: [{ box_type: 'FULL', name: 'Keju', qty: 1 }],
@@ -94,10 +94,9 @@ describe.skipIf(!hasTestDb)('order events: WhatsApp + idempotent Biteship dispat
             delivery_courier_company: 'grab', delivery_courier_type: 'same_day',
         })).rejects.toThrow(/Kurir yang dipilih/);
 
+        // BITESHIP_WHITELIST is ignored now.
         process.env.BITESHIP_WHITELIST = '0811 1111 1111';
         try {
-            await expect(deliveryOrder()).rejects.toThrow(/Store Delivery tidak tersedia/);
-            process.env.BITESHIP_WHITELIST = '0811 1111 1111, +62 812-3456-7890';
             await expect(deliveryOrder()).resolves.toMatchObject({ delivery_fee: 23000 });
         } finally {
             process.env.BITESHIP_WHITELIST = '';
