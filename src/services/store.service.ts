@@ -31,13 +31,29 @@ export interface UpdateStorePayload {
     bank_account_number?: string | null;
     bank_account_name?: string | null;
     qris_image_url?: string | null;
+    /** Official Google Maps link (business listing); empty → link from the coordinates. */
+    maps_url?: string | null;
     /** Boxes per day assumed for the HPP labor cost. */
     labor_target_boxes?: number;
     /** Store whose salary is used for this store's HPP labor cost (null = own). */
     labor_reference_store_id?: number | null;
 }
 
+/** Google Maps link for a store: its own maps_url, else one built from its coordinates. */
+export const storeMapsUrl = (store: { maps_url?: string | null; latitude?: unknown; longitude?: unknown }) => {
+    if (store.maps_url) return store.maps_url;
+    if (store.latitude == null || store.longitude == null || store.latitude === '' || store.longitude === '') return null;
+    return `https://www.google.com/maps/search/?api=1&query=${Number(store.latitude)},${Number(store.longitude)}`;
+};
+
 export const updateStore = async (id: number, payload: UpdateStorePayload) => {
+    if (payload.maps_url !== undefined) {
+        const url = typeof payload.maps_url === 'string' ? payload.maps_url.trim() : payload.maps_url;
+        if (url === null || url === '') payload.maps_url = null;
+        else if (typeof url !== 'string' || !/^https:\/\/\S+$/.test(url) || url.length > 500) {
+            throw new ValidationError('Link Google Maps harus berupa URL https://');
+        } else payload.maps_url = url;
+    }
     if (payload.last_pickup_time !== undefined) {
         if (typeof payload.last_pickup_time !== 'string' || !HHMM_RE.test(payload.last_pickup_time)) {
             throw new ValidationError('Jam terakhir pickup harus berformat HH:mm');
@@ -79,6 +95,7 @@ export const updateStore = async (id: number, payload: UpdateStorePayload) => {
         bank_account_number: payload.bank_account_number,
         bank_account_name: payload.bank_account_name,
         qris_image_url: payload.qris_image_url,
+        maps_url: payload.maps_url,
         labor_target_boxes: payload.labor_target_boxes,
         labor_reference_store_id: payload.labor_reference_store_id,
         updated_at: new Date().toISOString(),

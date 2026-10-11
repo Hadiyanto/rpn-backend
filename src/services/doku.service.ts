@@ -16,7 +16,7 @@ import { onOrderStatusChanged } from './orderEvents.service';
 //      for a checkout page and the frontend redirects the customer to it.
 //   2. DOKU POSTs an HTTP notification on payment → handleDokuNotification() marks the order PAID
 //      (same side effects as an admin marking it PAID: WhatsApp + Biteship dispatch).
-//   3. When the customer comes back (callback_url), syncDokuPayment() asks DOKU's Check Status API,
+//   3. When the customer comes back to /status/<token> (callback_url), syncDokuPayment() asks DOKU's Check Status API,
 //      in case the notification hasn't arrived (or can't reach us, e.g. local development).
 
 interface CheckoutOrder {
@@ -59,7 +59,7 @@ export const startDokuCheckout = async <T extends CheckoutOrder>(order: T) => {
         if (amount <= 0) throw new AppError(400, 'Total pesanan harus lebih dari 0 untuk pembayaran online');
 
         const invoiceNumber = newInvoiceNumber(order.id);
-        const returnUrl = `${frontendUrl()}/bukti-transfer/${order.public_token}`;
+        const returnUrl = `${frontendUrl()}/status/${order.public_token}`;
         const { response } = await createDokuCheckoutPayment({
             order: {
                 amount,
