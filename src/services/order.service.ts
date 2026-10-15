@@ -163,6 +163,13 @@ export const storeDeliveryOptionsForOrder = async (payload: Pick<CreateOrderPayl
     return deliveryOptionsFor(store_id, payload, pesanan);
 };
 
+/** The store's courier can't collect cash, so store-delivery orders must be paid up front. */
+const assertPaymentAllowedForDelivery = (payment_method: string | null | undefined, delivery_method: string | null | undefined) => {
+    if (payment_method === 'CASH' && delivery_method === 'store_delivery') {
+        throw new ValidationError('Pembayaran tunai tidak tersedia untuk Store Delivery');
+    }
+};
+
 export const createOrder = async (payload: CreateOrderPayload) => {
     const { payment_method, delivery_method, delivery_lat, delivery_lng, delivery_address, delivery_driver_note, delivery_area_id } = payload;
 
@@ -175,6 +182,7 @@ export const createOrder = async (payload: CreateOrderPayload) => {
     const pickup_date = validatePickupDate(payload.pickup_date);
     const pickup_time = validatePickupTime(payload.pickup_time);
     const note = validateNote(payload.note);
+    assertPaymentAllowedForDelivery(payment_method, delivery_method);
     await assertBoxesAvailable(store_id, validItems);
     await assertVariantSelections(validItems);
     // Prices come from the store's flavor prices, never from the client.
@@ -433,6 +441,7 @@ export interface UpdateOrderPayload {
 export const updateOrder = async (id: number, payload: UpdateOrderPayload) => {
     const { payment_method } = payload;
     const oldOrder = await getOrderById(id);
+    assertPaymentAllowedForDelivery(payment_method, oldOrder.delivery_method);
 
     // Admin edits may keep an order's existing (possibly past) date, but a changed
     // date must follow the same rules as a new order.
@@ -558,6 +567,10 @@ export const assertTransferImgUrl = (url: unknown): string => {
 };
 
 export const updatePaymentMethod = async (id: number, payment_method: string | null) => {
+    if (payment_method === 'CASH') {
+        const { rows: [order] } = await pool.query('SELECT delivery_method FROM orders WHERE id = $1', [id]);
+        if (order) assertPaymentAllowedForDelivery(payment_method, order.delivery_method);
+    }
     const { rows: [data] } = await pool.query(
         'UPDATE orders SET payment_method = $2, updated_at = CURRENT_TIMESTAMP WHERE id = $1 RETURNING *',
         [id, payment_method]

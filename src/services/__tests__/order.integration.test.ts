@@ -119,6 +119,23 @@ describe.skipIf(!hasTestDb)('orders with variant_ids (local Postgres + fake Redi
         expect(fakeRedis.store.size).toBe(0);
     });
 
+    it('store delivery cannot be paid in cash (create, edit, payment-method change)', async () => {
+        await expect(orders.createOrder({
+            ...base, payment_method: 'CASH', delivery_method: 'store_delivery', pesanan: [{ box_type: 'FULL', name: 'Keju', qty: 1 }],
+        })).rejects.toThrow(/tunai tidak tersedia/);
+        expect(fakeRedis.store.size).toBe(0);
+
+        const created = await orders.createOrder({ ...base, payment_method: 'TRANSFER', pesanan: [{ box_type: 'FULL', name: 'Keju', qty: 1 }] });
+        await db.pool.query(`UPDATE orders SET delivery_method = 'store_delivery' WHERE id = $1`, [created.id]);
+        await expect(orders.updatePaymentMethod(created.id, 'CASH')).rejects.toThrow(/tunai tidak tersedia/);
+        await expect(orders.updateOrder(created.id, { payment_method: 'CASH' })).rejects.toThrow(/tunai tidak tersedia/);
+        expect((await orders.updatePaymentMethod(created.id, 'QRIS')).payment_method).toBe('QRIS');
+
+        // Pickup orders can still switch to cash.
+        await db.pool.query(`UPDATE orders SET delivery_method = 'pickup' WHERE id = $1`, [created.id]);
+        expect((await orders.updatePaymentMethod(created.id, 'CASH')).payment_method).toBe('CASH');
+    });
+
     it('legacy items without variant_ids still work', async () => {
         const created = await orders.createOrder({ ...base, pesanan: [{ box_type: 'FULL', name: 'Keju', qty: 1 }] });
         const fetched = await orders.getOrderById(created.id);
