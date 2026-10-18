@@ -159,7 +159,7 @@ router.patch('/order/:id/status', async (req, res) => {
 
         const { order: data, previousStatus } = await changeOrderStatus(id, status);
 
-        // WhatsApp (PAID/DONE) and the Biteship dispatch (PAID) only on a real status change,
+        // WhatsApp (PAID/DONE) and Biteship dispatch (DONE for store delivery) only on a real status change,
         // in the background. Dispatch is idempotent per order (orders.biteship_order_id).
         getOrderById(id)
             .then(fullOrder => onOrderStatusChanged(fullOrder, previousStatus))

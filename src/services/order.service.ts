@@ -85,6 +85,12 @@ export type PricedOrderItem = ValidOrderItem & { unit_price: number; price_varia
 
 const DELIVERY_UNAVAILABLE = 'Store Delivery tidak tersedia untuk pesanan ini';
 
+const assertStoreOpenForOrders = async (storeId: number) => {
+    const { rows } = await pool.query('SELECT is_open_for_orders FROM stores WHERE id = $1', [storeId]);
+    if (!rows[0]) throw new NotFoundError(`Store dengan id ${storeId} tidak ditemukan`);
+    if (rows[0].is_open_for_orders === false) throw new ConflictError('Toko sedang tutup dan belum menerima order baru.');
+};
+
 /** Delivery options for these (priced) items, as Biteship quotes them right now. */
 const deliveryOptionsFor = async (storeId: number, payload: Pick<CreateOrderPayload, 'delivery_lat' | 'delivery_lng'>, items: PricedOrderItem[]) => {
     if (!payload.delivery_lat || !payload.delivery_lng) throw new ValidationError('Titik lokasi pengiriman wajib diisi');
@@ -159,6 +165,7 @@ export const storeDeliveryOptionsForOrder = async (payload: Pick<CreateOrderPayl
     'store_id' | 'pesanan' | 'customer_phone' | 'delivery_lat' | 'delivery_lng'>) => {
     if (!isStoreDeliveryAllowed(payload.customer_phone)) throw new ValidationError(DELIVERY_UNAVAILABLE);
     const store_id = validateStoreId(payload.store_id);
+    await assertStoreOpenForOrders(store_id);
     const pesanan = await priceItems(store_id, validateOrderItems(payload.pesanan));
     return deliveryOptionsFor(store_id, payload, pesanan);
 };
@@ -176,6 +183,7 @@ export const createOrder = async (payload: CreateOrderPayload) => {
     // Validate everything before touching Redis: a negative qty would otherwise
     // *increase* the remaining quota via incrbyfloat.
     const store_id = validateStoreId(payload.store_id);
+    await assertStoreOpenForOrders(store_id);
     const customer_name = validateCustomerName(payload.customer_name);
     const customer_phone = validatePhone(payload.customer_phone);
     const validItems = validateOrderItems(payload.pesanan);
@@ -275,6 +283,10 @@ export const createOrder = async (payload: CreateOrderPayload) => {
 
         // --- 3. INSERT ORDER (short transaction: just the writes) ---
         const created = await transaction(async (client) => {
+            // Serialize order creation with store closure; closeStoreForOrders locks this row too.
+            const storeState = await client.query('SELECT is_open_for_orders FROM stores WHERE id = $1 FOR UPDATE', [store_id]);
+            if (!storeState.rows[0]) throw new NotFoundError(`Store dengan id ${store_id} tidak ditemukan`);
+            if (storeState.rows[0].is_open_for_orders === false) throw new ConflictError('Toko sedang tutup dan belum menerima order baru.');
             const orderRes = await client.query(`
             INSERT INTO orders (
                 customer_name, customer_phone, pickup_date, pickup_time, note, status, payment_method, store_id,
@@ -395,8 +407,12 @@ export type OrderStatus = typeof VALID_STATUSES[number];
 
 export const updateOrderStatus = async (id: number, status: string) => (await changeOrderStatus(id, status)).order;
 
-/** Status update that also reports the previous status, so callers can run change-only side effects. */
-export const changeOrderStatus = async (id: number, status: string) => {
+/**
+ * Status update that also reports the previous status, so callers can run change-only side effects.
+ * `expectedStatus`: only change an order that is still in that status (ConflictError otherwise), so
+ * e.g. an automatic cancel never overwrites a payment that landed in the meantime.
+ */
+export const changeOrderStatus = async (id: number, status: string, options: { expectedStatus?: OrderStatus } = {}) => {
     const upperStatus = status.toUpperCase();
 
     if (!VALID_STATUSES.includes(upperStatus as OrderStatus)) {
@@ -406,10 +422,11 @@ export const changeOrderStatus = async (id: number, status: string) => {
     const oldOrder = await getOrderById(id);
 
     const { rows } = await pool.query(
-        'UPDATE orders SET status = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2 RETURNING *',
-        [upperStatus, id]
+        'UPDATE orders SET status = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2 AND ($3::text IS NULL OR status = $3) RETURNING *',
+        [upperStatus, id, options.expectedStatus ?? null]
     );
     const data = rows[0];
+    if (!data && options.expectedStatus) throw new ConflictError(`Order #${id} sudah tidak berstatus ${options.expectedStatus}`);
     if (!data) throw new NotFoundError(`Order dengan id ${id} tidak ditemukan`);
 
     const wasCancelled = oldOrder.status === 'CANCELLED';

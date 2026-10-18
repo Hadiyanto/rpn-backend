@@ -1,5 +1,7 @@
 import { Router } from 'express';
+import { authorize, csrfGuard, loadSession } from '../middleware/auth';
 
+import authRoute from './auth.route';
 import menuRoute from './menu.route';
 import variantRoute from './variant.route';
 import stockRoute from './stock.route';
@@ -27,6 +29,10 @@ import paymentRoute from './payment.route';
 
 const router = Router();
 
+// Own login (docs/plan-lepas-vendor.md §4): CSRF check, session cookie → req.user, then login +
+// page permission for every non-public route (AUTH_MODE off | log | enforce).
+router.use(csrfGuard, loadSession, authorize);
+router.use(authRoute);
 router.use(menuRoute);
 router.use(variantRoute);
 router.use(stockRoute);

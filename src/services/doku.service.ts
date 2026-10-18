@@ -1,10 +1,11 @@
 import { pool } from '../config/db';
-import { AppError, NotFoundError } from '../utils/errors';
+import { AppError, ConflictError, NotFoundError } from '../utils/errors';
 import { boxLabel } from '../utils/boxLabel';
 import { formatWAPhone } from '../utils/phone';
 import {
     createDokuCheckoutPayment,
     getDokuOrderStatus,
+    isDokuDevBypass,
     parseDokuExpiredDate,
     verifyDokuNotification,
 } from '../utils/doku';
@@ -60,6 +61,26 @@ export const startDokuCheckout = async <T extends CheckoutOrder>(order: T) => {
 
         const invoiceNumber = newInvoiceNumber(order.id);
         const returnUrl = `${frontendUrl()}/status/${order.public_token}`;
+
+        if (isDokuDevBypass()) {
+            // No DOKU: the "checkout page" is the order's status page, and the payment succeeds at once.
+            await pool.query(
+                `UPDATE orders SET doku_invoice_number = $2, doku_payment_url = $3, doku_expired_at = NULL, updated_at = CURRENT_TIMESTAMP
+                 WHERE id = $1`,
+                [order.id, invoiceNumber, returnUrl]
+            );
+            const outcome = await applyDokuStatus(invoiceNumber, 'SUCCESS', amount, 'DEV_BYPASS');
+            console.warn(`[DOKU] DOKU_DEV_BYPASS: order #${order.id} paid without DOKU (${outcome})`);
+            return {
+                ...order,
+                ...(outcome === 'paid' ? { status: 'PAID' } : {}),
+                doku_invoice_number: invoiceNumber,
+                doku_payment_url: returnUrl,
+                doku_expired_at: null,
+                payment_url: returnUrl,
+            };
+        }
+
         const { response } = await createDokuCheckoutPayment({
             order: {
                 amount,
@@ -164,7 +185,16 @@ const applyDokuStatus = async (
             return 'ignored';
         }
 
-        const { previousStatus } = await changeOrderStatus(row.id, 'PAID');
+        // expectedStatus: an order cancelled meanwhile (e.g. store closed) keeps its status.
+        const changed = await changeOrderStatus(row.id, 'PAID', { expectedStatus: 'UNPAID' }).catch(err => {
+            if (err instanceof ConflictError) return null;
+            throw err;
+        });
+        if (!changed) {
+            console.warn(`[DOKU] order #${row.id} paid via DOKU but no longer UNPAID; status left unchanged`);
+            return 'ignored';
+        }
+        const { previousStatus } = changed;
         getOrderById(row.id)
             .then(full => onOrderStatusChanged(full, previousStatus))
             .catch(err => console.error(`[order-events] could not load order #${row.id}:`, err));
@@ -173,7 +203,9 @@ const applyDokuStatus = async (
 
     if (status === 'EXPIRED' && row.status === 'UNPAID') {
         // Unpaid checkout expired → give the quota slot and raw materials back.
-        await changeOrderStatus(row.id, 'CANCELLED');
+        await changeOrderStatus(row.id, 'CANCELLED', { expectedStatus: 'UNPAID' }).catch(err => {
+            if (!(err instanceof ConflictError)) throw err;
+        });
         return 'cancelled';
     }
 
@@ -212,6 +244,7 @@ export const syncDokuPayment = async (token: string) => {
     );
     if (!order) throw new NotFoundError('Order tidak ditemukan');
     if (order.payment_method !== 'DOKU' || order.status !== 'UNPAID' || !order.doku_invoice_number) return;
+    if (isDokuDevBypass()) return;
 
     try {
         const res = await getDokuOrderStatus(order.doku_invoice_number);

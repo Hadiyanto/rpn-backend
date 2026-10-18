@@ -1,4 +1,4 @@
-import { NotFoundError } from '../utils/errors';
+import { ConflictError, NotFoundError } from '../utils/errors';
 import { ValidationError } from '../utils/validation';
 import { pool, updateRowById } from '../config/db';
 
@@ -13,6 +13,63 @@ export const getStoreById = async (id: number) => {
     const { rows } = await pool.query('SELECT * FROM stores WHERE id = $1', [id]);
     // supabase .single() threw when no row matched; callers rely on that.
     if (rows.length === 0) throw new NotFoundError(`Store dengan id ${id} tidak ditemukan`);
+    return rows[0];
+};
+
+export interface OpenOrderRow { id: number; customer_name: string; pickup_date: string; pickup_time: string | null; status: string }
+
+const sameIds = (a: number[], b: number[]) => {
+    const set = new Set(a);
+    return a.length === b.length && b.every(id => set.has(id));
+};
+
+/**
+ * Close order intake. PAID/CONFIRMED orders block it (they must be DONE/CANCELLED first). UNPAID orders
+ * don't block, but the admin must confirm their exact ids first: they are then returned as
+ * `unpaidToCancel` for the caller to cancel (services/storeClosure.service.ts). The store row lock
+ * serialises this with createOrder, so no order slips in between the check and the close.
+ */
+export const closeStoreForOrders = async (id: number, confirmedUnpaidIds?: number[]) => {
+    const client = await pool.connect();
+    try {
+        await client.query('BEGIN');
+        const store = await client.query('SELECT id, name, is_open_for_orders FROM stores WHERE id = $1 FOR UPDATE', [id]);
+        if (!store.rowCount) throw new NotFoundError(`Store dengan id ${id} tidak ditemukan`);
+        const { rows: open } = await client.query<OpenOrderRow>(`
+            SELECT id, customer_name, pickup_date, pickup_time, status
+            FROM orders
+            WHERE store_id = $1 AND status IN ('PAID', 'CONFIRMED', 'UNPAID')
+            ORDER BY pickup_date, pickup_time, id
+        `, [id]);
+        const blockers = open.filter(o => o.status !== 'UNPAID');
+        const unpaid = open.filter(o => o.status === 'UNPAID');
+        if (blockers.length) {
+            await client.query('COMMIT');
+            return { outcome: 'blocked' as const, store: store.rows[0], blockers, unpaid };
+        }
+        // The confirmation must name exactly the UNPAID orders there are now (a new one → ask again).
+        if (unpaid.length && !sameIds(confirmedUnpaidIds ?? [], unpaid.map(o => o.id))) {
+            await client.query('COMMIT');
+            return { outcome: 'confirm_unpaid' as const, store: store.rows[0], blockers, unpaid };
+        }
+        const { rows } = await client.query(
+            'UPDATE stores SET is_open_for_orders = false, updated_at = CURRENT_TIMESTAMP WHERE id = $1 RETURNING *', [id]
+        );
+        await client.query('COMMIT');
+        return { outcome: 'closed' as const, store: rows[0], blockers, unpaidToCancel: unpaid };
+    } catch (e) {
+        await client.query('ROLLBACK').catch(() => undefined);
+        throw e;
+    } finally {
+        client.release();
+    }
+};
+
+export const reopenStoreForOrders = async (id: number) => {
+    const { rows } = await pool.query(
+        'UPDATE stores SET is_open_for_orders = true, updated_at = CURRENT_TIMESTAMP WHERE id = $1 RETURNING *', [id]
+    );
+    if (!rows[0]) throw new NotFoundError(`Store dengan id ${id} tidak ditemukan`);
     return rows[0];
 };
 
@@ -37,6 +94,7 @@ export interface UpdateStorePayload {
     labor_target_boxes?: number;
     /** Store whose salary is used for this store's HPP labor cost (null = own). */
     labor_reference_store_id?: number | null;
+    is_open_for_orders?: boolean;
 }
 
 /** Google Maps link for a store: its own maps_url, else one built from its coordinates. */
@@ -98,6 +156,7 @@ export const updateStore = async (id: number, payload: UpdateStorePayload) => {
         maps_url: payload.maps_url,
         labor_target_boxes: payload.labor_target_boxes,
         labor_reference_store_id: payload.labor_reference_store_id,
+        is_open_for_orders: payload.is_open_for_orders,
         updated_at: new Date().toISOString(),
     });
     if (!data) throw new NotFoundError(`Store dengan id ${id} tidak ditemukan`);

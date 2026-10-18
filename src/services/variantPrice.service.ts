@@ -1,6 +1,7 @@
 import type { PoolClient } from 'pg';
 import { pool, transaction } from '../config/db';
 import { ValidationError, validateOrderItems, validateStoreId } from '../utils/validation';
+import { ConflictError } from '../utils/errors';
 
 type Queryable = Pick<PoolClient, 'query'>;
 
@@ -136,6 +137,8 @@ export const copyVariantPrices = async (client: Queryable, fromStoreId: number, 
 /** Price preview for the order form: same rules as createOrder (box = most expensive flavor). */
 export const quoteOrder = async (storeIdRaw: unknown, pesanan: unknown) => {
     const storeId = validateStoreId(storeIdRaw);
+    const store = await pool.query('SELECT is_open_for_orders FROM stores WHERE id = $1', [storeId]);
+    if (store.rows[0]?.is_open_for_orders === false) throw new ConflictError('Toko sedang tutup dan belum menerima order baru.');
     const items = validateOrderItems(pesanan);
     const prices = await priceOrderItems(storeId, items);
     const lines = items.map((item, i) => ({ box_type: item.box_type, qty: item.qty, variant_ids: item.variant_ids ?? [], ...prices[i], subtotal: prices[i].unit_price * item.qty }));

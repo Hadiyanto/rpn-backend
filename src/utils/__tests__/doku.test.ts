@@ -1,5 +1,24 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { dokuDigest, dokuSignature, dokuTimestamp, parseDokuExpiredDate, verifyDokuNotification } from '../doku';
+import { dokuDigest, dokuSignature, dokuTimestamp, isDokuDevBypass, parseDokuExpiredDate, verifyDokuNotification } from '../doku';
+
+describe('isDokuDevBypass', () => {
+    const nodeEnv = process.env.NODE_ENV;
+    afterEach(() => {
+        delete process.env.DOKU_DEV_BYPASS;
+        process.env.NODE_ENV = nodeEnv;
+    });
+
+    it('is on only for DOKU_DEV_BYPASS=true outside production', () => {
+        expect(isDokuDevBypass()).toBe(false);
+        process.env.DOKU_DEV_BYPASS = 'true';
+        expect(isDokuDevBypass()).toBe(true);
+        process.env.NODE_ENV = 'production';
+        expect(isDokuDevBypass()).toBe(false);
+        process.env.NODE_ENV = nodeEnv;
+        process.env.DOKU_DEV_BYPASS = '1';
+        expect(isDokuDevBypass()).toBe(false);
+    });
+});
 
 const SECRET = 'SK-test-secret';
 const CLIENT_ID = 'MCH-0001-10791114622547';

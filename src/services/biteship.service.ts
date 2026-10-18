@@ -1,8 +1,13 @@
+import { createHash, timingSafeEqual } from 'node:crypto';
 import { pool } from '../config/db';
 import { biteshipGet, biteshipPost } from '../utils/biteship';
 import { getStoreById } from './store.service';
 import { getMenuBoxMap, boxShippingItem } from './menu.service';
 import { boxLabel } from '../utils/boxLabel';
+import { FINAL_ATTEMPT_STATUSES, nextAttemptStatus, providerStatusNote } from '../utils/deliveryAttempt';
+import { ConflictError, NotFoundError } from '../utils/errors';
+import { ValidationError } from '../utils/validation';
+import { sendPushToAll } from './push.service';
 // import { formatWAPhone } from '../utils/phone'; // used by the (disabled) BITESHIP_WHITELIST check
 
 /**
@@ -107,24 +112,51 @@ export const getStoreDeliveryOptions = async (params: {
         .sort((a, b) => a.price - b.price);
 };
 
-// Placeholder written while a dispatch is in flight, so a concurrent call can't create a second one.
-const CLAIM = 'PENDING';
-
 type DispatchResult =
-    | { status: 'created'; biteship_order_id: string; tracking_link: string | null }
+    | { status: 'created'; biteship_order_id: string; tracking_link: string | null; attempt_id?: number }
     | { status: 'skipped'; reason: string };
 
-/** Atomically claims the order for dispatch. Returns false if it was already dispatched/claimed. */
-const claimDispatch = async (orderId: number) => {
-    const { rowCount } = await pool.query(
-        'UPDATE orders SET biteship_order_id = $2 WHERE id = $1 AND biteship_order_id IS NULL',
-        [orderId, CLAIM]
-    );
-    return rowCount === 1;
+const claimDispatch = async (order: any, retry = false, confirmUncertain = false) => {
+    const client = await pool.connect();
+    try {
+        await client.query('BEGIN');
+        const locked = await client.query('SELECT id, biteship_order_id FROM orders WHERE id = $1 FOR UPDATE', [order.id]);
+        if (!locked.rowCount) throw new NotFoundError(`Order #${order.id} tidak ditemukan`);
+        const { rows: previous } = await client.query(
+            'SELECT * FROM order_delivery_attempts WHERE order_id = $1 ORDER BY attempt_no DESC LIMIT 1', [order.id]
+        );
+        const last = previous[0];
+        const uncertainPrevious = last?.status === 'PENDING' && String(last.failure_message ?? '').startsWith('HASIL BELUM PASTI:');
+        if (uncertainPrevious && retry && confirmUncertain) {
+            await client.query("UPDATE order_delivery_attempts SET status = 'FAILED', updated_at = CURRENT_TIMESTAMP WHERE id = $1", [last.id]);
+        } else if (last && ['PENDING', 'ALLOCATED'].includes(last.status)) {
+            await client.query('COMMIT');
+            if (retry) throw new ConflictError('Percobaan pengiriman sebelumnya masih aktif. Perbarui statusnya sebelum membuat ulang.');
+            return null;
+        }
+        if (!retry && locked.rows[0].biteship_order_id && !['UNKNOWN', 'PENDING'].includes(locked.rows[0].biteship_order_id)) {
+            await client.query('COMMIT');
+            return null;
+        }
+        if (retry && last && !['FAILED', 'CANCELLED'].includes(last.status) && !(uncertainPrevious && confirmUncertain)) {
+            await client.query('COMMIT');
+            throw new ConflictError('Retry hanya tersedia untuk percobaan yang gagal atau dibatalkan.');
+        }
+        const attemptNo = Number(last?.attempt_no ?? 0) + 1;
+        const { rows } = await client.query(`
+            INSERT INTO order_delivery_attempts (order_id, attempt_no, status, courier_company, courier_type)
+            VALUES ($1, $2, 'PENDING', $3, $4) RETURNING *
+        `, [order.id, attemptNo, order.delivery_courier_company || 'grab', order.delivery_courier_type || 'instant']);
+        await client.query("UPDATE orders SET biteship_order_id = 'PENDING', updated_at = CURRENT_TIMESTAMP WHERE id = $1", [order.id]);
+        await client.query('COMMIT');
+        return rows[0];
+    } catch (e) {
+        await client.query('ROLLBACK').catch(() => undefined);
+        throw e;
+    } finally {
+        client.release();
+    }
 };
-
-const releaseClaim = (orderId: number) =>
-    pool.query('UPDATE orders SET biteship_order_id = NULL WHERE id = $1 AND biteship_order_id = $2', [orderId, CLAIM]);
 
 /** Falls back to the postal code in the address when the order has no Biteship area id. */
 const resolveAreaId = async (order: any): Promise<string | null> => {
@@ -147,28 +179,28 @@ const resolveAreaId = async (order: any): Promise<string | null> => {
  * Always delivery_type "now": the driver is called when the order is ready (Lalamove can't be scheduled).
  * `order` is the full order as returned by getOrderById (with items).
  */
-export const createBiteshipDispatch = async (order: any): Promise<DispatchResult> => {
+export const createBiteshipDispatch = async (order: any, options: { retry?: boolean; confirmUncertain?: boolean } = {}): Promise<DispatchResult> => {
     if (order.delivery_method !== 'store_delivery') return { status: 'skipped', reason: 'not store_delivery' };
     if (!isBiteshipEnabled()) {
         console.warn(`[Biteship] BITESHIP_ENABLED is off — courier for Order #${order.id} not booked.`);
         return { status: 'skipped', reason: 'biteship disabled' };
     }
-    if (!order.delivery_address || !order.delivery_lat || !order.delivery_lng) {
-        console.error(`[Biteship] Order #${order.id} is store_delivery but missing coordinate/address info.`);
-        return { status: 'skipped', reason: 'missing address/coordinates' };
-    }
-    if (!(await claimDispatch(order.id))) return { status: 'skipped', reason: 'already dispatched' };
+    const attempt = await claimDispatch(order, options.retry, options.confirmUncertain);
+    if (!attempt) return { status: 'skipped', reason: 'already dispatched' };
 
+    let providerAccepted = false;
+    let acceptedOrderId: string | null = null;
     try {
+        if (!order.delivery_address || !order.delivery_lat || !order.delivery_lng) {
+            throw new ValidationError('Alamat atau koordinat pengiriman order tidak lengkap.');
+        }
         // Optional for instant couriers: they go by destination_coordinate (addresses picked via Google
         // search often have no postal code to resolve an area from).
         const areaId = await resolveAreaId(order);
 
         const originStore = order.store_id ? await getStoreById(order.store_id) : null;
         if (!originStore) {
-            console.error(`[Biteship] Cannot create order #${order.id}: store_id is missing or store not found.`);
-            await releaseClaim(order.id);
-            return { status: 'skipped', reason: 'no store' };
+            throw new ValidationError(`Toko asal order #${order.id} tidak ditemukan.`);
         }
 
         const boxes = await getMenuBoxMap();
@@ -206,13 +238,292 @@ export const createBiteshipDispatch = async (order: any): Promise<DispatchResult
         };
 
         const created: any = await biteshipPost('/orders', payload);
+        providerAccepted = true;
         const biteshipOrderId = String(created?.id ?? created?.order_id ?? 'UNKNOWN');
-        await pool.query('UPDATE orders SET biteship_order_id = $2 WHERE id = $1', [order.id, biteshipOrderId]);
+        acceptedOrderId = biteshipOrderId === 'UNKNOWN' ? null : biteshipOrderId;
+        const trackingLink = created?.courier?.link ?? created?.tracking_link ?? null;
+        const status = normalizeDeliveryStatus(created?.status ?? created?.courier?.status) ?? 'ALLOCATED';
+        await pool.query(`
+            UPDATE order_delivery_attempts SET biteship_order_id = $2, status = $3,
+                provider_status = $4, tracking_link = $5, failure_message = $6,
+                driver_name = $7, driver_phone = $8, driver_plate_number = $9,
+                updated_at = CURRENT_TIMESTAMP WHERE id = $1
+        `, [attempt.id, biteshipOrderId === 'UNKNOWN' ? null : biteshipOrderId, status,
+            created?.status ?? null, trackingLink, status === 'FAILED' ? `Biteship menolak alokasi: ${created?.status ?? 'gagal'}` : null,
+            created?.courier?.driver_name ?? created?.courier?.name ?? null,
+            created?.courier?.driver_phone ?? created?.courier?.phone ?? null,
+            created?.courier?.driver_plate_number ?? null]);
+        await pool.query('UPDATE orders SET biteship_order_id = $2, updated_at = CURRENT_TIMESTAMP WHERE id = $1', [order.id, biteshipOrderId]);
         console.log(`[Biteship] Auto-created order ${biteshipOrderId} for RPN #${order.id}`);
-        return { status: 'created', biteship_order_id: biteshipOrderId, tracking_link: created?.courier?.link ?? null };
+        if (status === 'FAILED' || status === 'CANCELLED') notifyInBackground(notifyDeliveryProblem, attempt.id);
+        return { status: 'created', biteship_order_id: biteshipOrderId, tracking_link: trackingLink, attempt_id: attempt.id };
     } catch (err) {
-        // Nothing was created (or we can't tell) — release so an admin can retry by setting PAID again.
-        await releaseClaim(order.id).catch(() => undefined);
+        const outcomeUncertain = !providerAccepted && (err instanceof TypeError || (err as any)?.name === 'AbortError');
+        const errorMessage = err instanceof Error ? err.message : 'Biteship gagal membuat pengiriman.';
+        const failureMessage = outcomeUncertain ? `HASIL BELUM PASTI: ${errorMessage}. Periksa dashboard Biteship sebelum mencoba ulang.` : errorMessage;
+        await pool.query(`UPDATE order_delivery_attempts SET status = $2, biteship_order_id = $3, failure_message = $4,
+            failure_code = $5, updated_at = CURRENT_TIMESTAMP WHERE id = $1`,
+            [attempt.id, providerAccepted || outcomeUncertain ? 'PENDING' : 'FAILED', acceptedOrderId, failureMessage, (err as any)?.code ?? null]).catch(() => undefined);
+        await pool.query('UPDATE orders SET biteship_order_id = $2, updated_at = CURRENT_TIMESTAMP WHERE id = $1 AND biteship_order_id = \'PENDING\'',
+            [order.id, providerAccepted || outcomeUncertain ? (acceptedOrderId ?? 'UNKNOWN') : null]).catch(() => undefined);
+        // Failed, or booked-but-unknown: either way an admin has to look at it.
+        if (!providerAccepted || outcomeUncertain) notifyInBackground(notifyDeliveryProblem, attempt.id);
         throw err;
     }
+};
+
+const normalizeDeliveryStatus = (raw: unknown): string | null => {
+    if (typeof raw !== 'string') return null;
+    const compact = raw.toLowerCase().replace(/[_\s-]/g, '');
+    if (['delivered'].includes(compact)) return 'DELIVERED';
+    if (['couriernotfound', 'rejected', 'failed'].includes(compact)) return 'FAILED';
+    if (['cancelled', 'canceled', 'returned', 'disposed'].includes(compact)) return 'CANCELLED';
+    if (['allocated', 'pickingup', 'picked', 'intransit', 'droppingoff'].includes(compact)) return 'ALLOCATED';
+    if (['confirmed', 'pending', 'onhold'].includes(compact)) return 'PENDING';
+    return null;
+};
+
+// --- Admin notifications --------------------------------------------------------------------
+
+const COURIER_NAMES: Record<string, string> = {
+    grab: 'GrabExpress', gojek: 'GoSend', lalamove: 'Lalamove', borzo: 'Borzo', deliveree: 'Deliveree', paxel: 'Paxel',
+};
+const courierLabel = (company?: string | null, type?: string | null) => {
+    const name = company ? (COURIER_NAMES[company.toLowerCase()] ?? company) : 'Kurir';
+    return type ? `${name} ${type.charAt(0).toUpperCase()}${type.slice(1)}` : name;
+};
+const wibTime = (value: string | Date) =>
+    new Date(value).toLocaleTimeString('id-ID', { timeZone: 'Asia/Jakarta', hour: '2-digit', minute: '2-digit' }).replace('.', ':');
+const shorten = (text: string, max = 140) => (text.length > max ? `${text.slice(0, max - 1)}…` : text);
+
+/** The attempt with its order's customer and store, for notification texts. */
+const loadAttemptContext = async (attemptId: number) => {
+    const { rows } = await pool.query(`
+        SELECT a.*, o.customer_name, s.name AS store_name
+        FROM order_delivery_attempts a
+        JOIN orders o ON o.id = a.order_id
+        LEFT JOIN stores s ON s.id = o.store_id
+        WHERE a.id = $1`, [attemptId]);
+    return rows[0];
+};
+
+/** "✅ Order #123 sudah sampai" — at most once per attempt. */
+export const notifyDeliveryDelivered = async (attemptId: number) => {
+    const { rowCount } = await pool.query(`UPDATE order_delivery_attempts SET delivery_notified_at = CURRENT_TIMESTAMP
+        WHERE id = $1 AND status = 'DELIVERED' AND delivery_notified_at IS NULL`, [attemptId]);
+    if (!rowCount) return;
+    const a = await loadAttemptContext(attemptId);
+    const driver = a.driver_name ? ` · ${a.driver_name}${a.driver_plate_number ? ` (${a.driver_plate_number})` : ''}` : '';
+    await sendPushToAll({
+        title: `✅ Order #${a.order_id} sudah sampai`,
+        body: [
+            `Diterima ${a.customer_name} · ${a.store_name ?? 'Toko'}`,
+            `Kurir: ${courierLabel(a.courier_company, a.courier_type)}${driver}`,
+            `Tiba ${wibTime(a.provider_updated_at ?? new Date())} WIB`,
+        ].join('\n'),
+        url: `/orders?order=${a.order_id}`,
+        tag: `delivery-${a.order_id}`,
+    });
+};
+
+/** "⚠️ Kurir tidak didapat" (FAILED), "dibatalkan Biteship" (CANCELLED) or "belum pasti" — once per attempt. */
+export const notifyDeliveryProblem = async (attemptId: number) => {
+    const { rowCount } = await pool.query(`UPDATE order_delivery_attempts SET failure_notified_at = CURRENT_TIMESTAMP
+        WHERE id = $1 AND failure_notified_at IS NULL
+          AND (status IN ('FAILED', 'CANCELLED') OR failure_message LIKE 'HASIL BELUM PASTI:%')`, [attemptId]);
+    if (!rowCount) return;
+    const a = await loadAttemptContext(attemptId);
+    const headline = a.status === 'CANCELLED'
+        ? 'Pengiriman dibatalkan Biteship'
+        : a.status === 'FAILED' ? 'Kurir tidak didapat' : 'Booking kurir belum pasti';
+    const reason = String(a.failure_message || a.provider_status || 'tanpa keterangan').replace(/^HASIL BELUM PASTI:\s*/, '');
+    await sendPushToAll({
+        title: `⚠️ ${headline} · Order #${a.order_id}`,
+        body: [
+            `${a.customer_name} · ${a.store_name ?? 'Toko'} · ${courierLabel(a.courier_company, a.courier_type)} (percobaan ${a.attempt_no})`,
+            `Alasan: ${shorten(reason)}`,
+            a.status === 'PENDING' ? 'Cek dashboard Biteship sebelum coba ulang.' : 'Buka order untuk coba ulang pengiriman.',
+        ].join('\n'),
+        url: `/orders?order=${a.order_id}`,
+        tag: `delivery-${a.order_id}`,
+    });
+};
+
+const notifyInBackground = (notify: (attemptId: number) => Promise<void>, attemptId: number) => {
+    notify(attemptId).catch(err => console.error(`[Biteship] notification for attempt #${attemptId} failed:`, err?.message ?? err));
+};
+
+export const getDeliveryAttempts = async (orderId: number) => {
+    const { rows } = await pool.query('SELECT * FROM order_delivery_attempts WHERE order_id = $1 ORDER BY attempt_no DESC', [orderId]);
+    return rows;
+};
+
+/**
+ * Pulls one attempt's status from Biteship (GET /orders/:id). A failure or cancellation keeps Biteship's
+ * own explanation (courier.history note, e.g. "Order is rejected because no courier picking up order").
+ * Errors are logged, never thrown, so one bad attempt doesn't stop the others.
+ */
+const refreshAttempt = async (attempt: { id: number; status: string; biteship_order_id: string }) => {
+    try {
+        const remote: any = await biteshipGet(`/orders/${encodeURIComponent(attempt.biteship_order_id)}`);
+        const statusRaw = remote?.status ?? remote?.courier?.status;
+        const status = normalizeDeliveryStatus(statusRaw);
+        const courier = remote?.courier ?? {};
+        const targetStatus = nextAttemptStatus(attempt.status, status);
+        await pool.query(`UPDATE order_delivery_attempts SET
+            status = COALESCE($2, status), provider_status = COALESCE($3, provider_status),
+            tracking_link = COALESCE($4, tracking_link), waybill_id = COALESCE($5, waybill_id),
+            driver_name = COALESCE($6, driver_name), driver_phone = COALESCE($7, driver_phone),
+            driver_plate_number = COALESCE($8, driver_plate_number), provider_updated_at = CURRENT_TIMESTAMP,
+            failure_message = CASE
+                WHEN $2::varchar = 'FAILED' THEN COALESCE(failure_message, $9, 'Biteship gagal mengalokasikan kurir.')
+                WHEN $2::varchar = 'CANCELLED' THEN COALESCE(failure_message, $9)
+                ELSE failure_message END,
+            updated_at = CURRENT_TIMESTAMP
+            WHERE id = $1`, [attempt.id, targetStatus, statusRaw ?? null,
+            courier.link ?? remote?.tracking_link ?? null, courier.waybill_id ?? remote?.waybill_id ?? null,
+            courier.driver_name ?? courier.name ?? null, courier.driver_phone ?? courier.phone ?? null,
+            courier.driver_plate_number ?? null, providerStatusNote(remote)]);
+        if (targetStatus === 'DELIVERED') notifyInBackground(notifyDeliveryDelivered, attempt.id);
+        if (targetStatus === 'FAILED' || targetStatus === 'CANCELLED') notifyInBackground(notifyDeliveryProblem, attempt.id);
+        return targetStatus !== null && targetStatus !== attempt.status;
+    } catch (err) {
+        console.error(`[Biteship] refresh attempt #${attempt.id} failed:`, (err as Error)?.message ?? err);
+        return false;
+    }
+};
+
+export const refreshDeliveryAttempts = async (orderId: number) => {
+    const attempts = await getDeliveryAttempts(orderId);
+    for (const attempt of attempts) {
+        if (attempt.biteship_order_id) await refreshAttempt(attempt);
+    }
+    return getDeliveryAttempts(orderId);
+};
+
+/** Only attempts booked in the last day are polled; older ones are left to the Perbarui button. */
+const POLL_WINDOW_HOURS = 24;
+
+/**
+ * Pulls the status of every open attempt (PENDING/ALLOCATED with a Biteship order) from Biteship, so an
+ * allocation failure reaches the admins even when no webhook arrives. Returns how many attempts changed status.
+ */
+export const pollActiveDeliveryAttempts = async () => {
+    const { rows } = await pool.query(`
+        SELECT id, status, biteship_order_id FROM order_delivery_attempts
+        WHERE status IN ('PENDING', 'ALLOCATED') AND biteship_order_id IS NOT NULL
+          AND created_at > CURRENT_TIMESTAMP - make_interval(hours => $1)
+        ORDER BY id`, [POLL_WINDOW_HOURS]);
+    let changed = 0;
+    for (const attempt of rows) {
+        if (await refreshAttempt(attempt)) changed++;
+    }
+    return { checked: rows.length, changed };
+};
+
+/** BITESHIP_POLL_MINUTES (default 3; 0 = off): how often pollActiveDeliveryAttempts runs. */
+export const startDeliveryStatusPolling = () => {
+    const raw = process.env.BITESHIP_POLL_MINUTES;
+    const minutes = raw === undefined || raw.trim() === '' ? 3 : Number(raw);
+    if (!Number.isFinite(minutes) || minutes <= 0) {
+        console.log('[Biteship] status polling off (BITESHIP_POLL_MINUTES=0)');
+        return null;
+    }
+    let running = false;
+    const tick = async () => {
+        if (running) return; // a slow round never overlaps the next one
+        running = true;
+        try {
+            const { checked, changed } = await pollActiveDeliveryAttempts();
+            if (changed) console.log(`[Biteship] status poll: ${changed} of ${checked} open attempt(s) changed`);
+        } catch (err) {
+            console.error('[Biteship] status poll failed:', (err as Error)?.message ?? err);
+        } finally {
+            running = false;
+        }
+    };
+    console.log(`[Biteship] status polling every ${minutes} min`);
+    return setInterval(tick, minutes * 60 * 1000);
+};
+
+export const retryBiteshipDispatch = async (orderId: number, confirmUncertain = false) => {
+    const { rows } = await pool.query(`
+        SELECT o.*, COALESCE(json_agg(json_build_object('box_type', oi.box_type, 'name', oi.name, 'qty', oi.qty,
+            'unit_price', oi.unit_price) ORDER BY oi.id) FILTER (WHERE oi.id IS NOT NULL), '[]') AS items
+        FROM orders o LEFT JOIN order_items oi ON oi.order_id = o.id
+        WHERE o.id = $1 GROUP BY o.id
+    `, [orderId]);
+    if (!rows[0]) throw new NotFoundError(`Order #${orderId} tidak ditemukan`);
+    if (rows[0].delivery_method !== 'store_delivery' || rows[0].status !== 'DONE') {
+        throw new ConflictError('Retry Biteship hanya tersedia untuk order Store Delivery berstatus DONE.');
+    }
+    return createBiteshipDispatch(rows[0], { retry: true, confirmUncertain });
+};
+
+/** Validate Biteship's configured custom header and persist a status callback exactly once. */
+export const processBiteshipWebhook = async (body: any, rawBody: Buffer | undefined, headers: Record<string, unknown>) => {
+    const headerName = (process.env.BITESHIP_WEBHOOK_HEADER || '').trim().toLowerCase();
+    const secret = process.env.BITESHIP_WEBHOOK_SECRET || '';
+    if (!headerName || !secret) throw new Error('Webhook Biteship belum dikonfigurasi');
+    const supplied = String(headers[headerName] ?? '');
+    const expected = Buffer.from(secret);
+    const actual = Buffer.from(supplied);
+    if (actual.length !== expected.length || !timingSafeEqual(actual, expected)) throw new ValidationError('Signature webhook tidak valid');
+
+    const orderId = String(body?.order_id ?? body?.id ?? body?.order?.id ?? '');
+    const eventName = String(body?.event ?? body?.event_name ?? 'order.status');
+    if (!['order.status', 'order.waybill_id'].includes(eventName)) return { ignored: true };
+    if (!orderId) throw new ValidationError('ID order Biteship tidak ditemukan di webhook');
+    const eventHash = createHash('sha256').update(rawBody ?? Buffer.from(JSON.stringify(body))).digest('hex');
+    const statusRaw = body?.status ?? body?.order?.status;
+    const status = normalizeDeliveryStatus(statusRaw);
+    const courier = body?.courier ?? body?.order?.courier ?? {};
+    const providerUpdatedAt = body?.updated_at ?? body?.timestamp ?? null;
+    const client = await pool.connect();
+    let changed: { attemptId: number; status: string } | null = null;
+    try {
+        await client.query('BEGIN');
+        const inserted = await client.query(`
+            INSERT INTO biteship_webhook_events (event_hash, event_name, biteship_order_id)
+            VALUES ($1, $2, $3) ON CONFLICT (event_hash) DO NOTHING RETURNING id
+        `, [eventHash, eventName, orderId]);
+        if (!inserted.rowCount) { await client.query('COMMIT'); return { duplicate: true }; }
+        const attempt = await client.query(`
+            SELECT a.id, a.order_id, a.status, a.provider_updated_at
+            FROM order_delivery_attempts a WHERE a.biteship_order_id = $1 FOR UPDATE
+        `, [orderId]);
+        if (!attempt.rowCount) { await client.query('COMMIT'); return { unmatched: true }; }
+        const current = attempt.rows[0];
+        const incomingTime = providerUpdatedAt ? new Date(providerUpdatedAt) : null;
+        const isOlder = incomingTime && current.provider_updated_at && incomingTime < new Date(current.provider_updated_at);
+        const currentTerminal = FINAL_ATTEMPT_STATUSES.includes(current.status);
+        if (!isOlder && status && (!currentTerminal || status === current.status)) {
+            await client.query(`
+                UPDATE order_delivery_attempts SET status = $2, provider_status = $3,
+                    provider_updated_at = COALESCE($4::timestamptz, CURRENT_TIMESTAMP),
+                    tracking_link = COALESCE($5, tracking_link), waybill_id = COALESCE($6, waybill_id),
+                    driver_name = COALESCE($7, driver_name), driver_phone = COALESCE($8, driver_phone),
+                    driver_plate_number = COALESCE($9, driver_plate_number),
+                    failure_message = CASE WHEN $2::varchar = 'FAILED' THEN COALESCE(failure_message, 'Biteship gagal mengalokasikan kurir.') ELSE failure_message END,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = $1
+            `, [current.id, status, statusRaw ?? null, providerUpdatedAt,
+                body?.courier_link ?? body?.tracking_link ?? body?.link ?? courier?.link ?? null,
+                body?.courier_waybill_id ?? body?.waybill_id ?? courier?.waybill_id ?? null,
+                body?.courier_driver_name ?? courier?.driver_name ?? courier?.name ?? null,
+                body?.courier_driver_phone ?? courier?.driver_phone ?? courier?.phone ?? null,
+                body?.courier_driver_plate_number ?? courier?.driver_plate_number ?? null]);
+            changed = { attemptId: current.id, status };
+        }
+        await client.query('COMMIT');
+    } catch (e) {
+        await client.query('ROLLBACK').catch(() => undefined);
+        throw e;
+    } finally {
+        client.release();
+    }
+    // After commit, once per attempt (delivery_notified_at / failure_notified_at), so webhook retries stay quiet.
+    if (changed?.status === 'DELIVERED') notifyInBackground(notifyDeliveryDelivered, changed.attemptId);
+    if (changed?.status === 'FAILED' || changed?.status === 'CANCELLED') notifyInBackground(notifyDeliveryProblem, changed.attemptId);
+    return { ok: true };
 };

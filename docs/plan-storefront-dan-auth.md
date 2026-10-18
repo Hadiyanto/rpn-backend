@@ -146,6 +146,54 @@ Rilis bersamaan FE + BE (link WA/DOKU berpindah ke `/status/<token>`). Migration
 supaya ada titik simpan); diuji dengan DB salinan lokal + Redis lokal (`scratchpad/local-env.sh`).
 Saat siap: commit + push sekali, deploy, migration.
 
+#### Status C1–C3 (2026-10-17, lokal, belum di-commit)
+
+Keputusan: **reset password** (bukan impor hash Supabase), **sesi di DB** (bukan JWT), **cek Origin** untuk CSRF.
+
+- **C1** `migrations/1792260000000_users-and-sessions.js`: tabel `users` (role `superadmin|owner|employee`,
+  email lowercase) + `sessions` (`token_hash` sha256). Isi `user_roles` disalin dengan id sama
+  (`admin` → `superadmin`, lainnya → `employee`) dengan `password_hash = '!'`, jadi **belum bisa login
+  sampai password di-reset**. `user_roles` belum dihapus (D1). Up/down sudah dicoba di DB test lokal.
+- **C2** backend:
+  - `src/config/auth.ts` (AUTH_MODE, cookie, daftar halaman), `src/utils/password.ts` (scrypt),
+    `src/services/auth.service.ts`, `src/routes/auth.route.ts` (`POST /auth/login|logout`, `GET /auth/me`,
+    rate limit 5×/15 menit per IP+email), `src/cli/user.ts`.
+  - `src/middleware/auth.ts` dipasang di `routes/index.ts` untuk semua `/api`: `csrfGuard` (write yang
+    membawa cookie sesi wajib `Origin`/`Referer` ∈ `CORS_ORIGINS`) → `loadSession` (cookie basi
+    dihapus; masa berlaku digeser maks. 1×/jam) → `authorize` (`PUBLIC_ROUTES` + `PAGE_RULES`).
+  - `requireAdmin` sekarang berbasis sesi (superadmin/owner atau halaman `config`), tetap aktif di
+    semua AUTH_MODE seperti sebelumnya.
+  - Superadmin/owner melihat semua halaman (termasuk `analytics` & `shipping` yang dulu tidak ada di
+    `allowed_pages` admin); employee sesuai `allowed_pages`.
+  - Test: `src/middleware/__tests__/auth.test.ts` (unit) dan `src/routes/__tests__/auth.integration.test.ts`
+    (HTTP sungguhan + Postgres lokal). `npm test` 132 lulus, `npm run test:db` 208 lulus.
+- **C3** frontend: `utils/fetchJson.ts` → `apiFetch` (`credentials: 'include'` untuk `API_URL`, 401 di
+  halaman admin → `/login`); `adminFetchJson`, push, WhatsApp, kirim WA di `/orders` ikut `apiFetch`;
+  login/logout/`useUserRole` ke `/api/auth/*`; `middleware.ts` hanya cek ada cookie `rpn_session`
+  (tanpa panggilan Supabase per request); daftar halaman publik di `utils/publicPaths.ts`.
+  `utils/supabase/*`, `app/auth/callback` dan dependency `@supabase/*` dibiarkan untuk D1.
+- **Uji lokal** (`run-local.sh`, sekarang set `AUTH_COOKIE_SECURE=false` + `CORS_ORIGINS`): login salah →
+  pesan error; login owner → `/orders`, `/config`, WhatsApp status OK; kasir (employee, `orders`) → API
+  gaji 403 dan halaman `/salary` dialihkan ke `/orders`; logout dan user dinonaktifkan → kembali ke
+  `/login` tanpa loop; `/`, `/pesan`, `/status/*` tetap terbuka tanpa login.
+- **Belum**: `npm run build` frontend (dev server lokal sedang jalan), field `GET /stores` untuk publik
+  belum dipangkas, halaman "Pengguna" (pakai CLI dulu).
+
+#### C4 — langkah deploy (dijalankan user)
+1. Env backend: `AUTH_MODE=log`, `AUTH_COOKIE_DOMAIN=.rajapisangnugget.com`, `CORS_ORIGINS` berisi
+   persis `https://rajapisangnugget.com` (juga daftar CSRF).
+2. `docker exec rpn-backend npm run migrate up`, lalu deploy BE + FE.
+3. Password per admin: `docker exec -it rpn-backend node dist/cli/user.js reset-password <email>`
+   (dicetak sekali, kirim langsung ke orangnya). `list` untuk cek, `access <email> <role> [pages]` untuk ubah.
+4. Pakai semua halaman admin, lalu cek log `docker logs rpn-backend | grep "\[auth\] would"`: harus kosong
+   untuk user yang berhak. Rule halaman ada di `PAGE_RULES` (`src/middleware/auth.ts`).
+5. `AUTH_MODE=enforce` (atau hapus variabelnya, default enforce) → restart backend.
+6. Catatan IP: di repo setupvps (belum di-commit) site RPN sekarang meng-include
+   `nginx/snippets/cloudflare-real-ip.conf` (`real_ip_header CF-Connecting-IP` hanya dari range
+   Cloudflare), jadi `req.ip` = IP pengunjung, bukan IP edge Cloudflare. Deploy: `git pull && ./04-nginx.sh rpn`
+   di VPS; cara cek ada di README setupvps ("Real visitor IP behind Cloudflare"). Tanpa ini limiter
+   global & `POST /order` (5/15 menit) dibagi semua pelanggan per edge.
+
 ### Rilis 3 — lepas Supabase (setelah Rilis 2 stabil ±1 minggu)
 
 | ID | Task | Repo | Perkiraan |

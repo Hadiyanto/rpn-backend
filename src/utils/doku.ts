@@ -8,6 +8,12 @@ import { UpstreamError } from './errors';
 /** DOKU_PAYMENT=true sends customers to the DOKU checkout page instead of the manual TRANSFER/QRIS/CASH flow. */
 export const isDokuEnabled = () => process.env.DOKU_PAYMENT === 'true';
 
+/**
+ * DOKU_DEV_BYPASS=true (local development only): DOKU is never called — a DOKU order is marked PAID
+ * right away, as if the customer had paid. Ignored when NODE_ENV=production (the Docker image).
+ */
+export const isDokuDevBypass = () => process.env.DOKU_DEV_BYPASS === 'true' && process.env.NODE_ENV !== 'production';
+
 const baseUrl = () => process.env.DOKU_URL || 'https://api-sandbox.doku.com';
 const clientId = () => process.env.DOKU_CLIENT_ID || '';
 const secretKey = () => process.env.DOKU_SECRET_KEY || '';

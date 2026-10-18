@@ -3,10 +3,55 @@ import { sendError } from '../utils/errors';
 import { buildShippingItems } from '../services/menu.service';
 import { biteshipGet, biteshipPost } from '../utils/biteship';
 import { getStoreById } from '../services/store.service';
-import { DEFAULT_RATE_COURIERS, isStoreDeliveryAllowed } from '../services/biteship.service';
+import { DEFAULT_RATE_COURIERS, getDeliveryAttempts, isStoreDeliveryAllowed, processBiteshipWebhook, refreshDeliveryAttempts, retryBiteshipDispatch } from '../services/biteship.service';
 import { storeDeliveryOptionsForOrder } from '../services/order.service';
+import { requireAdmin } from '../middleware/requireAdmin';
+import { sendPushToAll } from '../services/push.service';
 
 const router = Router();
+
+router.post('/biteship/webhook', async (req, res) => {
+    try {
+        await processBiteshipWebhook(req.body, (req as any).rawBody, req.headers as Record<string, unknown>);
+        res.status(200).json({ status: 'ok' });
+    } catch (e: any) {
+        sendError(res, e);
+    }
+});
+
+router.get('/biteship/admin/orders/:orderId/deliveries', requireAdmin, async (req, res) => {
+    try {
+        const orderId = Number(req.params.orderId);
+        if (!Number.isInteger(orderId) || orderId < 1) {
+            res.status(400).json({ status: 'error', message: 'id order tidak valid' });
+            return;
+        }
+        res.json({ status: 'ok', data: await getDeliveryAttempts(orderId) });
+    } catch (e: any) { sendError(res, e); }
+});
+
+router.post('/biteship/admin/orders/:orderId/retry', requireAdmin, async (req, res) => {
+    try {
+        const orderId = Number(req.params.orderId);
+        if (!Number.isInteger(orderId) || orderId < 1) {
+            res.status(400).json({ status: 'error', message: 'id order tidak valid' });
+            return;
+        }
+        const data = await retryBiteshipDispatch(orderId, req.body?.confirm_uncertain === true);
+        res.json({ status: 'ok', data, deliveries: await getDeliveryAttempts(orderId) });
+    } catch (e: any) { sendError(res, e); }
+});
+
+router.post('/biteship/admin/orders/:orderId/refresh', requireAdmin, async (req, res) => {
+    try {
+        const orderId = Number(req.params.orderId);
+        if (!Number.isInteger(orderId) || orderId < 1) {
+            res.status(400).json({ status: 'error', message: 'id order tidak valid' });
+            return;
+        }
+        res.json({ status: 'ok', data: await refreshDeliveryAttempts(orderId) });
+    } catch (e: any) { sendError(res, e); }
+});
 
 /**
  * GET /api/biteship/areas?search=jakarta+selatan
@@ -85,6 +130,10 @@ router.post('/biteship/rates', async (req, res) => {
         }
 
         const originStore = await getStoreById(store_id);
+        if (originStore.is_open_for_orders === false) {
+            res.status(409).json({ status: 'error', message: 'Toko sedang tutup dan belum menerima order baru.' });
+            return;
+        }
         const ratePayload = {
             origin_latitude: Number(originStore.latitude),
             origin_longitude: Number(originStore.longitude),
@@ -156,6 +205,10 @@ router.post('/biteship/order', async (req, res) => {
         }
 
         const originStore = await getStoreById(store_id);
+        if (originStore.is_open_for_orders === false) {
+            res.status(409).json({ status: 'error', message: 'Toko sedang tutup dan belum menerima pengiriman baru.' });
+            return;
+        }
         const payload: Record<string, any> = {
             // Shipper = toko asal (per store_id)
             shipper_contact_name: originStore.name,

@@ -32,7 +32,20 @@ export const deleteSubscription = async (endpoint: string) => {
     await pool.query('DELETE FROM push_subscriptions WHERE endpoint = $1', [endpoint]);
 };
 
-export const sendPushToAll = async (payload: { title: string; body: string; url?: string }) => {
+export interface PushPayload {
+    title: string;
+    body: string;
+    url?: string;
+    /** Same tag → replaces the previous notification instead of stacking (it still alerts again). */
+    tag?: string;
+    /** Stays on screen until tapped (default in the service worker: true). */
+    requireInteraction?: boolean;
+}
+
+// urgency high: delivered right away even when the phone is idle (Android doze); TTL: drop after 1 hour.
+const PUSH_OPTIONS = { urgency: 'high' as const, TTL: 60 * 60 };
+
+export const sendPushToAll = async (payload: PushPayload) => {
     let subs: { endpoint: string; p256dh: string; auth: string }[];
     try {
         subs = (await pool.query('SELECT * FROM push_subscriptions')).rows;
@@ -47,6 +60,7 @@ export const sendPushToAll = async (payload: { title: string; body: string; url?
             webpush.sendNotification(
                 { endpoint: sub.endpoint, keys: { p256dh: sub.p256dh, auth: sub.auth } },
                 message,
+                PUSH_OPTIONS,
             ).catch(async (err) => {
                 if (err.statusCode === 410) {
                     await pool.query('DELETE FROM push_subscriptions WHERE endpoint = $1', [sub.endpoint]);
