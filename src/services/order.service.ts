@@ -130,6 +130,12 @@ const deliveryOptionsFor = async (storeId: number, payload: Pick<CreateOrderPayl
     })
         .catch(err => {
             console.error('[Biteship] delivery quote failed:', err?.message ?? err);
+            // No courier serves this destination (e.g. instant couriers to Bandung): an answer, not an
+            // outage. A 4xx with the message also survives Cloudflare, which replaces every 502 from the
+            // origin with its own "error code: 502" page.
+            if (/no courier available/i.test(String(err?.message ?? ''))) {
+                throw new ConflictError('Belum ada kurir yang bisa mengantar ke lokasi ini. Coba geser titik lokasi atau pilih ambil di toko.');
+            }
             throw new UpstreamError('Ongkir tidak bisa dihitung saat ini. Silakan coba lagi atau pilih metode pengambilan lain.');
         });
 };

@@ -16,7 +16,7 @@ const AREAS = {
 };
 let destination: unknown = AREAS.bandung;
 let paxelFails = false;
-let instantFails = false;
+let instantFails: false | 'no-courier' | 'down' = false;
 const calls: Array<{ path: string; body: any }> = [];
 const rate = (courier_code: string, courier_service_code: string, price: number) =>
     ({ courier_code, courier_service_code, courier_name: courier_code, courier_service_name: courier_service_code, duration: '1 - 3 hours', price });
@@ -29,7 +29,8 @@ vi.mock('../../utils/biteship', () => ({
             if (paxelFails) throw new Error('Biteship down');
             return { destination, pricing: [rate('paxel', 'small', 21500), rate('paxel', 'medium', 36500), rate('paxel', 'large', 44500)] };
         }
-        if (instantFails) throw new Error('No courier available for requested location.');
+        if (instantFails === 'no-courier') throw new Error('No courier available for requested location. Please activate other courier option to receive other pricing rate.');
+        if (instantFails === 'down') throw new Error('fetch failed');
         return { destination, pricing: [rate('grab', 'instant', 19000), rate('grab', 'same_day', 19000), rate('lalamove', 'motorcycle', 13200)] };
     }),
 }));
@@ -110,14 +111,20 @@ describe.skipIf(!hasTestDb)('Paxel Small for whitelisted customers outside Jabod
     });
 
     it('no instant courier to the destination (e.g. Bandung): Paxel alone for a whitelisted number, the usual error otherwise', async () => {
-        instantFails = true;
+        instantFails = 'no-courier';
         vi.spyOn(console, 'warn').mockImplementation(() => {});
         vi.spyOn(console, 'error').mockImplementation(() => {});
         expect(await offered(WHITELISTED)).toEqual(['paxel/small']);
-        await expect(options(OTHER)).rejects.toMatchObject({ status: 502 });
+        // No courier at all: a clear 409 (a 502 would be replaced by Cloudflare's "error code: 502" page).
+        const noCourier = { status: 409, message: 'Belum ada kurir yang bisa mengantar ke lokasi ini. Coba geser titik lokasi atau pilih ambil di toko.' };
+        await expect(options(OTHER)).rejects.toMatchObject(noCourier);
 
-        destination = AREAS.depok; // Paxel not allowed here → nothing left → the usual error
-        await expect(options(WHITELISTED)).rejects.toMatchObject({ status: 502 });
+        destination = AREAS.depok; // Paxel not allowed here → nothing left
+        await expect(options(WHITELISTED)).rejects.toMatchObject(noCourier);
+
+        // A real Biteship outage stays a 502.
+        instantFails = 'down';
+        await expect(options(OTHER)).rejects.toMatchObject({ status: 502 });
     });
 
     const order = (customer_phone: string) => orders.createOrder({
