@@ -192,6 +192,33 @@ describe.skipIf(!hasTestDb)('auth (local Postgres, real HTTP)', () => {
         expect((await changePassword(cookie, 'password-kasir', 'password-baru-1')).status).toBe(429);
     });
 
+    it('delivery status/refresh/retry: the cashier (orders page) may, others not, store close stays admin-only (M1)', async () => {
+        await auth.createUser({ email: 'gaji@rpn.test', password: 'password-gaji', role: 'employee', allowed_pages: ['salary'] });
+        const kasir = (await loginAs('kasir@rpn.test', 'password-kasir')).cookie;
+        const gaji = (await loginAs('gaji@rpn.test', 'password-gaji')).cookie;
+
+        expect((await api('/biteship/admin/orders/999999/deliveries')).status).toBe(401);
+        const list = await api('/biteship/admin/orders/999999/deliveries', { cookie: kasir });
+        expect(list.status).toBe(200);
+        expect((await list.json()).data).toEqual([]);
+        expect((await api('/biteship/admin/orders/999999/deliveries', { cookie: gaji })).status).toBe(403);
+        expect((await api('/biteship/admin/orders/999999/retry', { method: 'POST', cookie: gaji })).status).toBe(403);
+        // Retry itself is allowed for the cashier (here: no such order → 404, not 403).
+        expect((await api('/biteship/admin/orders/999999/retry', { method: 'POST', cookie: kasir })).status).toBe(404);
+
+        expect((await api('/stores/1/close-orders', { method: 'POST', cookie: kasir })).status).toBe(403);
+    });
+
+    // Last in this file: it uses up the guest limit of POST /order for 127.0.0.1.
+    it('POST /order: guests get 5 tries per 15 min, a logged-in session is not limited (M2)', async () => {
+        const { cookie } = await loginAs('kasir@rpn.test', 'password-kasir');
+        const bad = JSON.stringify({ customer_name: 'x' }); // invalid on purpose: 400, nothing is created
+        for (let i = 0; i < 7; i++) expect((await api('/order', { method: 'POST', cookie, body: bad })).status).toBe(400);
+        for (let i = 0; i < 5; i++) expect((await api('/order', { method: 'POST', body: bad })).status).toBe(400);
+        expect((await api('/order', { method: 'POST', body: bad })).status).toBe(429);
+        expect((await api('/order', { method: 'POST', cookie, body: bad })).status).toBe(400); // staff still fine
+    });
+
     it('CLI-level validation: role, pages and password length', async () => {
         await expect(auth.createUser({ email: 'x@rpn.test', password: 'pendek', role: 'owner' })).rejects.toMatchObject({ status: 400 });
         await expect(auth.createUser({ email: 'x@rpn.test', password: 'cukup-panjang', role: 'admin' })).rejects.toMatchObject({ status: 400 });

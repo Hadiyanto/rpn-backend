@@ -137,5 +137,21 @@ export const onOrderStatusChanged = (order: any, previousStatus: string) =>
         }
     });
 
+/**
+ * A failed courier booking went through on "Coba ulang": the first message said the courier would be
+ * booked soon (without a link), so send the tracking link now (review 2026-10-19, L4).
+ */
+export const onDeliveryRebooked = (order: any, trackingLink: string | null) =>
+    guard(`rebooked #${order.id}`, async () => {
+        const delivery = deliveryInfo(order);
+        if (!delivery) return;
+        await sendWA(order.customer_phone, buildDeliveryDispatchedMessage({
+            customer_name: order.customer_name,
+            order_id: order.id,
+            courier: delivery.courier,
+            tracking_link: trackingLink,
+        }), 'DONE delivery retry');
+    });
+
 export const onTransferUploaded = (order: { id: number; customer_name: string; customer_phone: string | null }) =>
     guard(`transfer #${order.id}`, () => sendWA(order.customer_phone, buildTransferReceivedMessage(order.customer_name), 'Transfer Img Upload'));

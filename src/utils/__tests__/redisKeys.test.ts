@@ -9,6 +9,7 @@ describe('redisKeys', () => {
             redisKeys.menuCache,
             redisKeys.variantsCache,
             redisKeys.waSession('main'),
+            redisKeys.orderIdempotency('abc-123'),
             redisPatterns.quota,
             redisPatterns.cache,
         ];

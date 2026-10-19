@@ -128,7 +128,7 @@ export const getDailySalaries = async (storeId?: number) => {
 export interface BoxSource {
     store_id: number;
     store_name: string;
-    /** Box units (HALF = 0.5) of PAID/DONE orders picked up that day. */
+    /** Box units (HALF = 0.5) of PAID/CONFIRMED/DONE orders picked up that day (CONFIRMED: review 2026-10-19, M4). */
     boxes: number;
 }
 
@@ -151,7 +151,7 @@ export const calculateSalaryPreview = async (date: string, storeId: number, boxS
     const { rows } = await db.query(`
         SELECT s.id AS store_id, s.name AS store_name, COALESCE(SUM(${BOX_UNITS_SQL}), 0) AS boxes
         FROM stores s
-        LEFT JOIN orders o ON o.store_id = s.id AND o.pickup_date = $1::date AND o.status IN ('PAID', 'DONE')
+        LEFT JOIN orders o ON o.store_id = s.id AND o.pickup_date = $1::date AND o.status IN ('PAID', 'CONFIRMED', 'DONE')
         LEFT JOIN order_items oi ON oi.order_id = o.id
         WHERE s.id = ANY($2::int[])
         GROUP BY s.id, s.name

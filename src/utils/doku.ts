@@ -90,7 +90,8 @@ const dokuRequest = async <T>(method: 'GET' | 'POST', path: string, body?: unkno
     if (!res.ok) {
         const detail = data?.error_messages?.join(', ') || data?.error?.message || data?.message || `HTTP ${res.status}`;
         console.error(`[DOKU] ${method} ${path} failed (${res.status}):`, data);
-        throw new UpstreamError(`DOKU: ${detail}`);
+        // httpStatus lets callers tell "unknown to DOKU" (404) apart from an outage.
+        throw Object.assign(new UpstreamError(`DOKU: ${detail}`), { httpStatus: res.status });
     }
     return data as T;
 };

@@ -5,6 +5,9 @@ import { getStoreById } from './store.service';
 import { getMenuBoxMap, boxShippingItem } from './menu.service';
 import { boxLabel } from '../utils/boxLabel';
 import { FINAL_ATTEMPT_STATUSES, nextAttemptStatus, providerStatusNote } from '../utils/deliveryAttempt';
+import { isOutsideJabodetabek } from '../utils/deliveryArea';
+import { PAXEL_COURIER, PAXEL_SERVICE, isPaxelAllowed, withoutDimensions } from '../utils/paxel';
+import { startRecurringJob } from '../utils/recurringJob';
 import { ConflictError, NotFoundError } from '../utils/errors';
 import { ValidationError } from '../utils/validation';
 import { sendPushToAll } from './push.service';
@@ -36,7 +39,8 @@ export const DEFAULT_RATE_COURIERS = 'gosend,grab,gojek,lalamove,paxel,borzo,sic
 
 /**
  * Store delivery services the customer can choose from. All are booked with delivery_type "now"
- * when the order is DONE (ready), so the driver comes when the order is ready.
+ * when the order is DONE (ready), so the driver comes when the order is ready. Paxel Small is offered
+ * on top of these, separately (whitelist + outside Jabodetabek, see getStoreDeliveryOptions).
  */
 const COURIER_SERVICES: Record<string, string> = {
     grab: 'instant',
@@ -78,26 +82,55 @@ export const getStoreDeliveryOptions = async (params: {
     lat: number;
     lng: number;
     items: { box_type: string; name: string; qty: number; unit_price: number | null }[];
+    /** Decides whether Paxel is offered (PAXEL_WHITELIST). */
+    customer_phone?: string | null;
 }): Promise<DeliveryOption[]> => {
     const store = await getStoreById(params.store_id);
     const boxes = await getMenuBoxMap();
     const couriers = offeredCouriers();
-    const data: any = await biteshipPost('/rates/couriers', {
+    const items = params.items.map(item => ({
+        name: `${boxLabel(item.box_type)} - ${item.name}`,
+        ...boxShippingItem(boxes.get(item.box_type), item.box_type),
+        ...(item.unit_price != null ? { value: Number(item.unit_price) } : {}),
+        quantity: item.qty,
+    }));
+    const rates = (rateCouriers: string, rateItems: unknown[]) => biteshipPost('/rates/couriers', {
         origin_latitude: Number(store.latitude),
         origin_longitude: Number(store.longitude),
         destination_latitude: params.lat,
         destination_longitude: params.lng,
-        couriers: couriers.join(','),
-        items: params.items.map(item => ({
-            name: `${boxLabel(item.box_type)} - ${item.name}`,
-            ...boxShippingItem(boxes.get(item.box_type), item.box_type),
-            ...(item.unit_price != null ? { value: Number(item.unit_price) } : {}),
-            quantity: item.qty,
-        })),
+        couriers: rateCouriers,
+        items: rateItems,
     });
+    const withPaxel = isPaxelAllowed(params.customer_phone);
+    let instantError: unknown = null;
+    const [data, paxel]: any[] = await Promise.all([
+        // Outside the instant couriers' range Biteship rejects this call ("No courier available …");
+        // for a Paxel customer that must not hide Paxel, so the error is held until Paxel is known.
+        withPaxel
+            ? rates(couriers.join(','), items).catch(err => { instantError = err; return null; })
+            : rates(couriers.join(','), items),
+        // Whitelisted customers also get Paxel Small, quoted without box dimensions. A failed Paxel
+        // quote never hides the other couriers.
+        withPaxel
+            ? rates(PAXEL_COURIER, items.map(withoutDimensions)).catch(err => {
+                console.error('[Biteship] Paxel quote failed:', err?.message ?? err);
+                return null;
+            })
+            : null,
+    ]);
+    const paxelRates = paxel && isOutsideJabodetabek(paxel.destination)
+        ? ((paxel.pricing ?? []) as any[]).filter(r => r.courier_code === PAXEL_COURIER && r.courier_service_code === PAXEL_SERVICE)
+        : [];
+    if (instantError) {
+        if (paxelRates.length === 0) throw instantError;
+        console.warn('[Biteship] instant couriers unavailable, offering Paxel only:', (instantError as Error)?.message ?? instantError);
+    }
     return ((data?.pricing ?? []) as any[])
         // courier_code / courier_service_code are what POST /orders expects as courier_company / courier_type.
-        .filter(r => couriers.includes(r.courier_code) && COURIER_SERVICES[r.courier_code] === r.courier_service_code && Number(r.price) > 0)
+        .filter(r => couriers.includes(r.courier_code) && COURIER_SERVICES[r.courier_code] === r.courier_service_code)
+        .concat(paxelRates)
+        .filter(r => Number(r.price) > 0)
         .map(r => ({
             courier_company: r.courier_code,
             courier_type: r.courier_service_code,
@@ -226,14 +259,18 @@ export const createBiteshipDispatch = async (order: any, options: { retry?: bool
             courier_company: order.delivery_courier_company || 'grab',
             courier_type: order.delivery_courier_type || 'instant',
             delivery_type: 'now',
-            items: (order.items || []).map((item: any) => ({
-                name: `${boxLabel(item.box_type)} - ${item.name}`,
-                description: `RPN ${item.box_type}`,
-                ...boxShippingItem(boxes.get(item.box_type), item.box_type),
-                // Declared value = the box price actually charged.
-                ...(item.unit_price != null ? { value: Number(item.unit_price) } : {}),
-                quantity: item.qty,
-            })),
+            items: (order.items || []).map((item: any) => {
+                const shippingItem = {
+                    name: `${boxLabel(item.box_type)} - ${item.name}`,
+                    description: `RPN ${item.box_type}`,
+                    ...boxShippingItem(boxes.get(item.box_type), item.box_type),
+                    // Declared value = the box price actually charged.
+                    ...(item.unit_price != null ? { value: Number(item.unit_price) } : {}),
+                    quantity: item.qty,
+                };
+                // Paxel is booked the way it was quoted: without box dimensions.
+                return order.delivery_courier_company === PAXEL_COURIER ? withoutDimensions(shippingItem) : shippingItem;
+            }),
             order_note: `RPN Order #${order.id}${order.note ? ` - ${order.note}` : ''}`,
         };
 
@@ -422,28 +459,50 @@ export const pollActiveDeliveryAttempts = async () => {
 };
 
 /** BITESHIP_POLL_MINUTES (default 3; 0 = off): how often pollActiveDeliveryAttempts runs. */
-export const startDeliveryStatusPolling = () => {
-    const raw = process.env.BITESHIP_POLL_MINUTES;
-    const minutes = raw === undefined || raw.trim() === '' ? 3 : Number(raw);
-    if (!Number.isFinite(minutes) || minutes <= 0) {
-        console.log('[Biteship] status polling off (BITESHIP_POLL_MINUTES=0)');
-        return null;
-    }
-    let running = false;
-    const tick = async () => {
-        if (running) return; // a slow round never overlaps the next one
-        running = true;
-        try {
-            const { checked, changed } = await pollActiveDeliveryAttempts();
-            if (changed) console.log(`[Biteship] status poll: ${changed} of ${checked} open attempt(s) changed`);
-        } catch (err) {
-            console.error('[Biteship] status poll failed:', (err as Error)?.message ?? err);
-        } finally {
-            running = false;
+export const startDeliveryStatusPolling = () =>
+    startRecurringJob('[Biteship] status polling', 'BITESHIP_POLL_MINUTES', 3, async () => {
+        const { checked, changed } = await pollActiveDeliveryAttempts();
+        return changed ? `${changed} of ${checked} open attempt(s) changed` : null;
+    });
+
+/**
+ * The RPN order was cancelled: cancel its open Biteship shipments, so no courier comes and nothing is
+ * charged (review 2026-10-19, H6). Never throws; when Biteship refuses (e.g. already picked up) or the
+ * booking is uncertain, admins get a push to sort it out in the Biteship dashboard.
+ */
+export const cancelActiveDeliveries = async (orderId: number) => {
+    const { rows } = await pool.query(
+        `SELECT id, biteship_order_id FROM order_delivery_attempts WHERE order_id = $1 AND status IN ('PENDING', 'ALLOCATED') ORDER BY id`,
+        [orderId]);
+    for (const attempt of rows) {
+        let problem: string | null = null;
+        if (!attempt.biteship_order_id) {
+            problem = 'Booking kurir belum pasti, cek dashboard Biteship.';
+        } else {
+            try {
+                await biteshipPost(`/orders/${encodeURIComponent(attempt.biteship_order_id)}/cancel`, {
+                    cancellation_reason_code: 'others',
+                    cancellation_reason: `Order RPN #${orderId} dibatalkan`,
+                });
+            } catch (err) {
+                problem = `Biteship menolak pembatalan: ${(err as Error)?.message ?? err}`;
+            }
         }
-    };
-    console.log(`[Biteship] status polling every ${minutes} min`);
-    return setInterval(tick, minutes * 60 * 1000);
+        if (problem) {
+            console.error(`[Biteship] could not cancel attempt #${attempt.id} of Order #${orderId}:`, problem);
+            await sendPushToAll({
+                title: `⚠️ Kurir belum dibatalkan · Order #${orderId}`,
+                body: `Order dibatalkan, tapi pengiriman Biteship masih aktif. ${shorten(problem)}`,
+                url: `/orders?order=${orderId}`,
+                tag: `delivery-${orderId}`,
+            }).catch(e => console.error('[Biteship] cancel alert failed:', e?.message ?? e));
+            continue;
+        }
+        // failure_notified_at: our own cancellation is no "dibatalkan Biteship" problem for admins.
+        await pool.query(`UPDATE order_delivery_attempts SET status = 'CANCELLED', provider_status = 'cancelled',
+            failure_message = 'Dibatalkan karena order RPN dibatalkan', failure_notified_at = CURRENT_TIMESTAMP,
+            updated_at = CURRENT_TIMESTAMP WHERE id = $1`, [attempt.id]);
+    }
 };
 
 export const retryBiteshipDispatch = async (orderId: number, confirmUncertain = false) => {

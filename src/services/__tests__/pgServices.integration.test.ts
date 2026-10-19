@@ -60,21 +60,26 @@ describe.skipIf(!hasTestDb)('services on pg (shape parity & behaviour)', () => {
         expect((await getPengeluaran())[0].name).toBe('Gas');
     });
 
-    it('POS transaction: header + lines atomically, sequential order numbers under concurrency, menu embed', async () => {
-        await db.pool.query(`INSERT INTO menu (name, price) VALUES ('FULL', 65000)`);
-        const { createTransaction } = await import('../transaction.service');
-        const { getPenjualanByTransaction } = await import('../penjualan.service');
-        const item = { menu_id: 1, type: 'FULL', topping: ['Keju'], qty: 1, price: 65000, total_price: 65000 };
+    it('pengeluaran: validated input, fix or delete a wrong entry, salary-booked rows stay with the salary (I7)', async () => {
+        const svc = await import('../pengeluaran.service');
+        for (const bad of [{ name: '', price: 1000 }, { name: 'Gas', price: 0 }, { name: 'Gas', price: -5 }, { name: 'Gas', price: 'abc' },
+            { name: 'Gas', price: 1000, date: '2026-02-30' }, { name: 'Gas', price: 1000, store_id: 'x' }]) {
+            await expect(svc.createPengeluaran(bad as any)).rejects.toMatchObject({ status: 400 });
+        }
 
-        const results = await Promise.all(Array.from({ length: 5 }, () => createTransaction([item], 65000, 'Walk-in')));
-        expect(results.map(r => r.order_number).sort()).toEqual(['RPN-0000001', 'RPN-0000002', 'RPN-0000003', 'RPN-0000004', 'RPN-0000005']);
+        const row = await svc.createPengeluaran({ name: ' Gas ', price: 25000, date: '2099-01-05', category: 'Operasional' });
+        expect(row).toMatchObject({ name: 'Gas', price: 25000 });
+        const fixed = await svc.updatePengeluaran(row.id, { price: 27500, date: '2099-01-06' });
+        expect(fixed).toMatchObject({ name: 'Gas', price: 27500, date: '2099-01-06', category: 'Operasional' });
+        await expect(svc.updatePengeluaran(row.id, {})).rejects.toMatchObject({ status: 400 });
+        await svc.deletePengeluaran(row.id);
+        await expect(svc.deletePengeluaran(row.id)).rejects.toMatchObject({ status: 404 });
 
-        const lines = await getPenjualanByTransaction(results[0].id);
-        expect(lines[0]).toMatchObject({ menu: { name: 'FULL' }, variant: '["Keju"]', quantity: 1, price: 65000 });
-
-        // A failing line rolls the header back too.
-        await expect(createTransaction([{ ...item, qty: null }], 1, 'x')).rejects.toBeTruthy();
-        expect((await db.pool.query('SELECT count(*)::int AS n FROM transactions')).rows[0].n).toBe(5);
+        const { rows: [salaryRow] } = await db.pool.query(`
+            WITH s AS (INSERT INTO daily_salary (date, store_id, total_boxes, total_salary, breakdown) VALUES ('2099-01-05', 1, 10, 100000, '[]') RETURNING id)
+            INSERT INTO pengeluaran (name, category, price, date, store_id, daily_salary_id) SELECT 'Gaji', 'Gaji', 100000, '2099-01-05', 1, id FROM s RETURNING id`);
+        await expect(svc.updatePengeluaran(salaryRow.id, { price: 1 })).rejects.toMatchObject({ status: 409 });
+        await expect(svc.deletePengeluaran(salaryRow.id)).rejects.toMatchObject({ status: 409 });
     });
 
     it('salary per store: atomic replace, HALF = 0.5, expense booked once, labor cost via reference store', async () => {
@@ -106,6 +111,12 @@ describe.skipIf(!hasTestDb)('services on pg (shape parity & behaviour)', () => {
         expect(both.box_sources.map(b => [b.store_id, b.boxes])).toEqual([[1, 20.5], [2, 4]]);
         await expect(salary.calculateSalaryPreview('2099-01-05', 1, [])).rejects.toMatchObject({ status: 400 });
         expect((await salary.generateDailySalary('2099-01-05', 1, [1, 2])).box_sources).toHaveLength(2);
+
+        // CONFIRMED (paid and confirmed, not yet DONE) counts too (review 2026-10-19, M4); CANCELLED does not.
+        await db.pool.query(`INSERT INTO orders (customer_name, customer_phone, pickup_date, status, store_id) VALUES
+            ('D', '0812', '2099-01-07', 'CONFIRMED', 2), ('E', '0812', '2099-01-07', 'CANCELLED', 2)`);
+        await db.pool.query(`INSERT INTO order_items (order_id, box_type, name, qty) SELECT id, 'FULL', 'v', 3 FROM orders WHERE customer_name IN ('D', 'E')`);
+        expect((await salary.calculateSalaryPreview('2099-01-07', 2)).totalBoxesRaw).toBe(3);
 
         await salary.generateDailySalary('2099-01-05', 1);
         const saved = await salary.generateDailySalary('2099-01-05', 1);
@@ -201,10 +212,7 @@ describe.skipIf(!hasTestDb)('services on pg (shape parity & behaviour)', () => {
         expect((await orders.updatePaymentMethod(1, 'CASH')).payment_method).toBe('CASH');
     });
 
-    it('user role & push subscriptions', async () => {
-        const { getUserRoleOrDefault } = await import('../userRole.service');
-        expect((await getUserRoleOrDefault('not-a-uuid')).role).toBe('staff');
-
+    it('push subscriptions', async () => {
         const push = await import('../push.service');
         await push.saveSubscription({ endpoint: 'https://push/1', keys: { p256dh: 'a', auth: 'b' } });
         const again = await push.saveSubscription({ endpoint: 'https://push/1', keys: { p256dh: 'c', auth: 'd' } });

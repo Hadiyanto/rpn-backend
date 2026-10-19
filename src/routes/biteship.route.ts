@@ -4,11 +4,16 @@ import { buildShippingItems } from '../services/menu.service';
 import { biteshipGet, biteshipPost } from '../utils/biteship';
 import { getStoreById } from '../services/store.service';
 import { DEFAULT_RATE_COURIERS, getDeliveryAttempts, isStoreDeliveryAllowed, processBiteshipWebhook, refreshDeliveryAttempts, retryBiteshipDispatch } from '../services/biteship.service';
-import { storeDeliveryOptionsForOrder } from '../services/order.service';
-import { requireAdmin } from '../middleware/requireAdmin';
+import { getOrderById, storeDeliveryOptionsForOrder } from '../services/order.service';
+import { onDeliveryRebooked } from '../services/orderEvents.service';
+import { requirePage } from '../middleware/requireAdmin';
 import { sendPushToAll } from '../services/push.service';
 
 const router = Router();
+
+// Delivery status, refresh and retry belong to whoever handles orders (e.g. the cashier), not only to
+// admins — otherwise a "courier not found" is invisible to them (review 2026-10-19, M1).
+const requireOrdersPage = requirePage('orders');
 
 router.post('/biteship/webhook', async (req, res) => {
     try {
@@ -19,7 +24,7 @@ router.post('/biteship/webhook', async (req, res) => {
     }
 });
 
-router.get('/biteship/admin/orders/:orderId/deliveries', requireAdmin, async (req, res) => {
+router.get('/biteship/admin/orders/:orderId/deliveries', requireOrdersPage, async (req, res) => {
     try {
         const orderId = Number(req.params.orderId);
         if (!Number.isInteger(orderId) || orderId < 1) {
@@ -30,7 +35,7 @@ router.get('/biteship/admin/orders/:orderId/deliveries', requireAdmin, async (re
     } catch (e: any) { sendError(res, e); }
 });
 
-router.post('/biteship/admin/orders/:orderId/retry', requireAdmin, async (req, res) => {
+router.post('/biteship/admin/orders/:orderId/retry', requireOrdersPage, async (req, res) => {
     try {
         const orderId = Number(req.params.orderId);
         if (!Number.isInteger(orderId) || orderId < 1) {
@@ -38,11 +43,17 @@ router.post('/biteship/admin/orders/:orderId/retry', requireAdmin, async (req, r
             return;
         }
         const data = await retryBiteshipDispatch(orderId, req.body?.confirm_uncertain === true);
+        // The customer gets the tracking link of the booking that finally went through (background).
+        if (data.status === 'created') {
+            getOrderById(orderId)
+                .then(order => onDeliveryRebooked(order, data.tracking_link))
+                .catch(err => console.error(`[order-events] could not load order #${orderId}:`, err));
+        }
         res.json({ status: 'ok', data, deliveries: await getDeliveryAttempts(orderId) });
     } catch (e: any) { sendError(res, e); }
 });
 
-router.post('/biteship/admin/orders/:orderId/refresh', requireAdmin, async (req, res) => {
+router.post('/biteship/admin/orders/:orderId/refresh', requireOrdersPage, async (req, res) => {
     try {
         const orderId = Number(req.params.orderId);
         if (!Number.isInteger(orderId) || orderId < 1) {
@@ -75,7 +86,7 @@ router.get('/biteship/areas', async (req, res) => {
 
 /**
  * POST /api/biteship/eligibility { customer_phone } → { store_delivery: boolean }
- * Whether the order form may offer Store Delivery to this customer (BITESHIP_ENABLED + BITESHIP_WHITELIST).
+ * Whether the order form may offer Store Delivery to this customer: always yes now (isStoreDeliveryAllowed).
  * The whitelist itself never leaves the server.
  */
 router.post('/biteship/eligibility', (req, res) => {
@@ -87,6 +98,7 @@ router.post('/biteship/eligibility', (req, res) => {
  *   { store_id, pesanan, customer_phone, delivery_lat, delivery_lng }
  * → [{ courier_company, courier_type, courier_name, service_name, duration, price, shipping_fee, … }]
  * The couriers the customer can pick (SELECTED_COURIER), priced exactly as POST /order charges them.
+ * Plus Paxel Small when customer_phone is in PAXEL_WHITELIST and the destination is outside Jabodetabek.
  */
 router.post('/biteship/store-delivery-options', async (req, res) => {
     try {

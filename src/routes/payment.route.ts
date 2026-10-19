@@ -10,8 +10,8 @@ const router = Router();
 // Which payment methods the customer order form offers.
 //   doku_enabled:     DOKU_PAYMENT=true → DOKU checkout (QRIS) replaces manual QRIS.
 //   transfer_enabled: TRANSFER_PAYMENT=false hides bank transfer (on by default).
-//   biteship_enabled: BITESHIP_ENABLED=true → the form may offer Store Delivery; whether it does for a
-//                     customer depends on BITESHIP_WHITELIST (POST /api/biteship/eligibility).
+//   biteship_enabled: always true now (Store Delivery is always offered; isBiteshipEnabled). Paxel on top
+//                     depends on PAXEL_WHITELIST, decided in POST /api/biteship/store-delivery-options.
 router.get('/payment/config', (_req, res) => {
     res.json({
         status: 'ok',

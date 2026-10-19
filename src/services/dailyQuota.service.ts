@@ -1,7 +1,7 @@
 import { pool, insertRow } from '../config/db';
 import { redis, ttlUntilDate } from '../utils/redis';
 import { BOX_UNITS_SQL, remainingQuota } from '../utils/boxUnits';
-import { ValidationError } from '../utils/validation';
+import { ValidationError, todayWIB } from '../utils/validation';
 import { redisKeys } from '../utils/redisKeys';
 import { NotFoundError } from '../utils/errors';
 
@@ -68,9 +68,13 @@ const withRemaining = async <T extends { date: string; qty: string | number }>(s
 
 export const getDailyQuotas = async (store_id: number) => {
     // DB is needed for the master 'qty' (total provisioned limit) and 'id' mappings
+    // Every upcoming date (the order form needs the nearest ones even when many are opened ahead) plus
+    // the last two weeks for the admin list (review 2026-10-19, L2). Newest first, as before.
     const { rows } = await pool.query(
-        'SELECT id, date, qty, store_id FROM daily_quota WHERE store_id = $1 ORDER BY date DESC LIMIT 30',
-        [store_id]
+        `SELECT id, date, qty, store_id FROM daily_quota
+         WHERE store_id = $1 AND date >= $2::date - 14
+         ORDER BY date DESC LIMIT 120`,
+        [store_id, todayWIB()]
     );
     return withRemaining(store_id, rows);
 };

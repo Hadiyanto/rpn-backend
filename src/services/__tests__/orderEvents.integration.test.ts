@@ -24,6 +24,8 @@ describe.skipIf(!hasTestDb)('order events: WhatsApp + idempotent Biteship dispat
     let events: typeof import('../orderEvents.service');
     let biteship: typeof import('../biteship.service');
     let date: typeof import('../../utils/date');
+    // Tomorrow (WIB): a fixed time like 12:00 today is already past when the tests run in the afternoon.
+    const tomorrowWIB = () => date.todayWIB(new Date(Date.now() + 24 * 60 * 60 * 1000));
 
     beforeAll(async () => {
         useTestDb();
@@ -55,14 +57,16 @@ describe.skipIf(!hasTestDb)('order events: WhatsApp + idempotent Biteship dispat
             ] }
             : { id: 'bs-123', courier: { link: 'https://track.biteship.com/abc' } });
         sendMessage.mockClear();
-        await db.pool.query('TRUNCATE orders, order_items, daily_quota, menu RESTART IDENTITY CASCADE');
+        await db.pool.query('TRUNCATE orders, order_items, daily_quota, menu, variant RESTART IDENTITY CASCADE');
         await db.pool.query(`INSERT INTO menu (name, price) VALUES ('FULL', 65000), ('HALF', 35000)`);
-        await db.pool.query(`INSERT INTO daily_quota (date, qty, store_id) VALUES ($1, 100, 1)`, [date.todayWIB()]);
+        await db.pool.query(`INSERT INTO variant (variant_name) VALUES ('Keju')`);
+        await db.pool.query(`INSERT INTO variant_price (variant_id, store_id, price_full, price_half) SELECT v.id, s.id, 65000, 35000 FROM variant v CROSS JOIN stores s`);
+        await db.pool.query(`INSERT INTO daily_quota (date, qty, store_id) VALUES ($1, 100, 1)`, [tomorrowWIB()]);
     });
 
     const deliveryOrder = () => orders.createOrder({
-        customer_name: 'Budi', customer_phone: '081234567890', pickup_date: date.todayWIB(), pickup_time: '12:00', store_id: 1,
-        pesanan: [{ box_type: 'FULL', name: 'Keju', qty: 2 }],
+        customer_name: 'Budi', customer_phone: '081234567890', pickup_date: tomorrowWIB(), pickup_time: '12:00', store_id: 1,
+        pesanan: [{ box_type: 'FULL', name: 'Keju', qty: 2, variant_ids: [1] }],
         delivery_method: 'store_delivery', delivery_lat: -6.25, delivery_lng: 106.85,
         delivery_address: 'Jl. Contoh 1, Jakarta 12750', delivery_area_id: 'AREA-1',
         delivery_courier_company: 'grab', delivery_courier_type: 'instant',
@@ -76,7 +80,7 @@ describe.skipIf(!hasTestDb)('order events: WhatsApp + idempotent Biteship dispat
     it('offers the three couriers cheapest first; the order stores the picked one, priced server-side', async () => {
         const options = await orders.storeDeliveryOptionsForOrder({
             store_id: 1, customer_phone: '081234567890', delivery_lat: -6.25, delivery_lng: 106.85,
-            pesanan: [{ box_type: 'FULL', name: 'Keju', qty: 2 }],
+            pesanan: [{ box_type: 'FULL', name: 'Keju', qty: 2, variant_ids: [1] }],
         });
         expect(options.map(o => [o.courier_company, o.courier_type, o.price])).toEqual([
             ['lalamove', 'motorcycle', 22200], ['grab', 'instant', 23000], ['gojek', 'instant', 26500],
@@ -88,8 +92,8 @@ describe.skipIf(!hasTestDb)('order events: WhatsApp + idempotent Biteship dispat
 
     it('rejects a courier that is not offered; any customer may pick Store Delivery (no whitelist)', async () => {
         await expect(orders.createOrder({
-            customer_name: 'Budi', customer_phone: '081234567890', pickup_date: date.todayWIB(), pickup_time: '12:00', store_id: 1,
-            pesanan: [{ box_type: 'FULL', name: 'Keju', qty: 1 }],
+            customer_name: 'Budi', customer_phone: '081234567890', pickup_date: tomorrowWIB(), pickup_time: '12:00', store_id: 1,
+            pesanan: [{ box_type: 'FULL', name: 'Keju', qty: 1, variant_ids: [1] }],
             delivery_method: 'store_delivery', delivery_lat: -6.25, delivery_lng: 106.85, delivery_address: 'Jl. Contoh 1',
             delivery_courier_company: 'grab', delivery_courier_type: 'same_day',
         })).rejects.toThrow(/Kurir yang dipilih/);
@@ -158,8 +162,8 @@ describe.skipIf(!hasTestDb)('order events: WhatsApp + idempotent Biteship dispat
 
     it('WhatsApp only on a real status change; pickup orders are never dispatched', async () => {
         const order = await orders.createOrder({
-            customer_name: 'Sari', customer_phone: '081234567891', pickup_date: date.todayWIB(), store_id: 1,
-            pesanan: [{ box_type: 'HALF', name: 'Keju', qty: 1 }],
+            customer_name: 'Sari', customer_phone: '081234567891', pickup_date: tomorrowWIB(), store_id: 1,
+            pesanan: [{ box_type: 'HALF', name: 'Keju', qty: 1, variant_ids: [1] }],
         });
         await setStatus(order.id, 'PAID');
         expect(sendMessage).toHaveBeenCalledTimes(1);
@@ -168,5 +172,20 @@ describe.skipIf(!hasTestDb)('order events: WhatsApp + idempotent Biteship dispat
         await setStatus(order.id, 'DONE');
         expect(sendMessage).toHaveBeenCalledTimes(2);
         expect(dispatchCalls()).toHaveLength(0);
+    });
+
+    it('a booking that went through on retry sends the customer the tracking link; pickup orders get nothing (L4)', async () => {
+        const order = await orders.getOrderById((await deliveryOrder()).id);
+        sendMessage.mockClear();
+        await events.onDeliveryRebooked(order, 'https://track.biteship.com/retry-1');
+        expect(sendMessage).toHaveBeenCalledTimes(1);
+        expect(String((sendMessage.mock.calls[0] as unknown[])[1])).toContain('https://track.biteship.com/retry-1');
+
+        const pickup = await orders.createOrder({
+            customer_name: 'Sari', customer_phone: '081234567891', pickup_date: tomorrowWIB(), store_id: 1,
+            pesanan: [{ box_type: 'HALF', name: 'Keju', qty: 1, variant_ids: [1] }],
+        });
+        await events.onDeliveryRebooked(await orders.getOrderById(pickup.id), 'https://track.biteship.com/x');
+        expect(sendMessage).toHaveBeenCalledTimes(1);
     });
 });

@@ -27,14 +27,14 @@ Gaji pokok Rp 150.000 per hari (sudah termasuk 15 box pertama), lalu bonus per b
 - ⚠️ **Konfigurasi di prod sekarang salah.** Isinya `15–20 = 175.000/box`, `21–25 = 205.000/box`, dan `26–30 = 240.000/box`: yang diisi adalah *total gaji*, padahal kolom itu *bonus per box*. Akibatnya 20 box dihitung 6 × 175.000 = **Rp 1.050.000**. Form sekarang mudah disalahpahami.
 - Kekurangan lain:
   1. **Tidak per store.** `daily_salary` unik per tanggal, dan box dihitung dari semua store digabung. Kalibata 20 + Depok 15 = 35 box → satu gaji.
-  2. Box dihitung dari order `PAID`/`DONE` berdasarkan `pickup_date`, dengan HALF = 0,5 lalu dibulatkan ke atas.
+  2. Box dihitung dari order `PAID`/`CONFIRMED`/`DONE` berdasarkan `pickup_date`, dengan HALF = 0,5 lalu dibulatkan ke atas.
   3. Rincian per tingkat (seperti contoh di atas) tidak ditampilkan. Hanya totalnya.
   4. Tidak ada validasi tingkat: bisa ada celah atau tumpang tindih.
   5. Gaji belum masuk HPP maupun laporan keuangan (`finance.service` hanya menghitung `pengeluaran`).
 
 ## Keputusan (2026-09-27, revisi 2)
 - ✅ Konfigurasi gaji: `0–15 = 150.000 (fixed)`, `16–20 = 5.000`, `21–25 = 6.000`, `26–30 = 7.000`. **Lebih dari 30 box tetap Rp 240.000.**
-- ✅ Box Kecil = ½ box, total dibulatkan ke atas. Status order yang dihitung: PAID + DONE.
+- ✅ Box Kecil = ½ box, total dibulatkan ke atas. Status order yang dihitung: PAID + CONFIRMED + DONE (CONFIRMED ditambahkan 2026-10-19, review M4).
 - ✅ **1 orang per store per hari. Gaji terpisah per store**, termasuk **Depok** (walau sekarang dikerjakan pemilik, gajinya tetap dihitung dan dicatat).
 - ✅ Gaji harian **dicatat otomatis di Pengeluaran** per store. Gaji tidak lagi dicatat manual.
 - ✅ **Laporan keuangan dipisah per store.**
@@ -53,7 +53,7 @@ Setelah migration: Depok `labor_reference_store_id = Kalibata`.
 
 ### Perhitungan
 - `computeSalary(tiers, boxes)` (fungsi murni) → `{ total, lines[] }`. Contoh 20 box: `[1–15 gaji pokok 150.000] [16–20: 5 × 5.000 = 25.000]` = 175.000.
-- `calculateSalaryPreview(date, store_id)`: box units order PAID/DONE store itu pada `pickup_date`, dibulatkan ke atas, lalu tingkat store itu.
+- `calculateSalaryPreview(date, store_id)`: box units order PAID/CONFIRMED/DONE store itu pada `pickup_date`, dibulatkan ke atas, lalu tingkat store itu.
 - `generateDailySalary(date, store_id)` dalam 1 transaksi: upsert `daily_salary` lalu upsert pengeluaran tertaut (`name = "Gaji harian <store> <tgl>"`, `category = "Gaji"`, `store_id`, `price = total`). Generate ulang memperbarui baris yang sama, jadi tidak dobel.
 - **HPP tenaga kerja** store S: `R = S.labor_reference_store_id ?? S`, lalu `per box = gaji_R(target_R) / target_R`. Kalibata target 30: 240.000 / 30 = **Rp 8.000 per Box Besar, Rp 4.000 per Box Kecil** (× porsi box). Depok (acuan Kalibata): nilai yang sama.
   `getVariantHpp` menambah `hpp_labor` dan `labor_reference`. Tampilan: `Box Besar Rp X (bahan a + kemasan b + tenaga kerja c · acuan Kalibata)`.
@@ -102,7 +102,7 @@ Hasilnya `{ total, lines: [{ from, to, boxes, rate, amount, fixed }] }`, dipakai
 ```
 20 box → [ {1–15, gaji pokok, 150.000}, {16–20, 5 × 5.000 = 25.000} ]  total 175.000
 ```
-- Box per hari **per store** = Σ box units order `PAID`/`DONE` dengan `pickup_date` = tanggal itu (HALF = 0,5), dibulatkan ke atas.
+- Box per hari **per store** = Σ box units order `PAID`/`CONFIRMED`/`DONE` dengan `pickup_date` = tanggal itu (HALF = 0,5), dibulatkan ke atas.
 - Validasi saat simpan konfigurasi: tingkat pertama mulai dari 0 atau 1 dan fixed (gaji pokok), tiap tingkat berikutnya mulai tepat setelah tingkat sebelumnya (tanpa celah atau tumpang tindih), hanya tingkat terakhir yang boleh tanpa batas atas, dan nominal ≥ 0.
 
 ### HPP: dua sudut pandang

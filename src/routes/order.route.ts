@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import { sendError } from '../utils/errors';
+import { ValidationError } from '../utils/validation';
 import rateLimit from 'express-rate-limit';
 import { createOrder, getOrders, getOrderById, changeOrderStatus, updatePaymentMethod, updateOrder, updateTransferImgUrl, getPublicOrder, getOrderIdByPublicToken, assertTransferImgUrl } from '../services/order.service';
 import { onOrderCreated, onOrderStatusChanged, onTransferUploaded } from '../services/orderEvents.service';
@@ -7,6 +8,7 @@ import { recalculateOrderStock } from '../services/stockDeduction.service';
 import { quoteOrder } from '../services/variantPrice.service';
 import { startDokuCheckout } from '../services/doku.service';
 import { isDokuEnabled } from '../utils/doku';
+import { createOrderOnce } from '../services/orderIdempotency.service';
 
 const router = Router();
 
@@ -31,6 +33,8 @@ const orderLimiter = rateLimit({
     },
     standardHeaders: true,
     legacyHeaders: false,
+    // Logged-in staff entering orders by hand (/orders form) are not guests (review 2026-10-19, M2).
+    skip: req => !!req.user,
 });
 
 router.post('/order', orderLimiter, async (req, res) => {
@@ -55,15 +59,18 @@ router.post('/order', orderLimiter, async (req, res) => {
             return;
         }
 
-        const order = await createOrder({
-            customer_name, customer_phone, pesanan, pickup_date, pickup_time, note, payment_method, store_id,
-            delivery_method, delivery_lat, delivery_lng, delivery_address, delivery_driver_note, delivery_area_id,
-            delivery_courier_company, delivery_courier_type
+        // Idempotency-Key: a resend of the same order (dropped connection) returns the first one.
+        const { data, replayed } = await createOrderOnce(req.header('idempotency-key'), async () => {
+            const order = await createOrder({
+                customer_name, customer_phone, pesanan, pickup_date, pickup_time, note, payment_method, store_id,
+                delivery_method, delivery_lat, delivery_lng, delivery_address, delivery_driver_note, delivery_area_id,
+                delivery_courier_company, delivery_courier_type
+            }, { staff: !!req.user });
+            return doku ? await startDokuCheckout(order) : order;
         });
-        const data = doku ? await startDokuCheckout(order) : order;
 
-        // Push + WhatsApp run in the background; they never affect the response.
-        void onOrderCreated(data);
+        // Push + WhatsApp run in the background; they never affect the response (and only once).
+        if (!replayed) void onOrderCreated(data);
 
         res.json({ status: 'ok', data });
     } catch (e: any) {
@@ -89,11 +96,19 @@ router.patch('/order/:id', async (req, res) => {
 
 router.get('/orders', async (req, res) => {
     try {
-        const { status, day, store_id } = req.query;
+        const { status, day, store_id, from, to } = req.query;
+        const date = (v: unknown, name: string) => {
+            if (v === undefined || v === '') return undefined;
+            if (typeof v !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(v)) throw new ValidationError(`${name} harus berformat YYYY-MM-DD`);
+            return v;
+        };
         const data = await getOrders({
             status: status as string | undefined,
             day: day as string | undefined,
             store_id: store_id ? Number(store_id) : undefined,
+            // Pickup date range, e.g. the /orders page only polls the recent and upcoming orders.
+            from: date(from, 'from'),
+            to: date(to, 'to'),
         });
         res.json({ status: 'ok', data });
     } catch (e: any) {

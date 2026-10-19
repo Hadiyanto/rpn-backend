@@ -1,5 +1,6 @@
 import { Router, Request, Response, NextFunction } from 'express';
 import multer from 'multer';
+import rateLimit from 'express-rate-limit';
 import { v2 as cloudinary } from 'cloudinary';
 import fs from 'fs';
 
@@ -34,7 +35,18 @@ const receiveImage = (req: Request, res: Response, next: NextFunction) =>
         next();
     });
 
-router.post('/upload-image', receiveImage, async (req: Request, res: Response): Promise<void> => {
+// The endpoint is public (transfer proofs), so cap guests: every upload is stored on Cloudinary
+// (review 2026-10-19, I2). Logged-in staff (expense receipts, flavor photos) are not limited.
+const uploadLimiter = rateLimit({
+    windowMs: 15 * 60 * 1000,
+    max: 20,
+    skip: req => !!req.user,
+    message: { status: 'error', message: 'Terlalu banyak upload. Coba lagi 15 menit lagi.' },
+    standardHeaders: true,
+    legacyHeaders: false,
+});
+
+router.post('/upload-image', uploadLimiter, receiveImage, async (req: Request, res: Response): Promise<void> => {
     const filePath = req.file?.path;
     try {
         if (!req.file || !filePath) {

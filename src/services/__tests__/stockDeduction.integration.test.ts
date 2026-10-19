@@ -147,7 +147,11 @@ describe.skipIf(!hasTestDb)('auto stock deduction lifecycle', () => {
     });
 
     it('legacy items without variant_ids are not deducted', async () => {
-        await orders.createOrder({ ...base, pesanan: [{ box_type: 'FULL', name: 'Dark Choco', qty: 3 }] });
+        // New orders always carry variant_ids; legacy rows only exist from before, so make one.
+        const order = await orders.createOrder({ ...base, pesanan: [{ box_type: 'FULL', name: 'Dark Choco', qty: 3, variant_ids: [1] }] });
+        await db.pool.query('DELETE FROM order_item_variants');
+        const { recalculateOrderStock } = await import('../stockDeduction.service');
+        await recalculateOrderStock(order.id);
         expect(await tepungQty()).toBe(5000);
     });
 

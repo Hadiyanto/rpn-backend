@@ -8,8 +8,9 @@ import apiRoutes from './routes';
 
 import { getWhatsAppService, isWhatsAppDisabled } from './services/whatsapp.service';
 import { sendError } from './utils/errors';
-import { isDokuDevBypass } from './utils/doku';
+import { isDokuDevBypass, isDokuEnabled } from './utils/doku';
 import { startDeliveryStatusPolling } from './services/biteship.service';
+import { startDokuExpiryJob } from './services/doku.service';
 
 dotenv.config();
 
@@ -77,6 +78,8 @@ app.listen(port, () => {
     if (isDokuDevBypass()) console.warn('[server]: DOKU_DEV_BYPASS=true — DOKU orders are marked PAID without calling DOKU');
     // Pull Biteship statuses of open deliveries, so "courier not found" reaches admins without a webhook.
     startDeliveryStatusPolling();
+    // Close DOKU checkouts that expired unpaid, so they stop holding quota and raw materials.
+    if (isDokuEnabled()) startDokuExpiryJob();
 
     // Initialize WhatsApp service. WHATSAPP_DISABLED=true skips it — needed when running a second
     // instance (e.g. local Docker) against the production Redis: two sockets on the same WA session

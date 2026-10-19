@@ -58,15 +58,15 @@ describe.skipIf(!hasTestDb)('orders with variant_ids (local Postgres + fake Redi
     });
 
     it('cold Redis cache is warmed from DB instead of rejecting as full', async () => {
-        await orders.createOrder({ ...base, pesanan: [{ box_type: 'FULL', name: 'Keju', qty: 4 }] });
+        await orders.createOrder({ ...base, pesanan: [{ box_type: 'FULL', name: 'Keju', qty: 4, variant_ids: [3] }] });
         fakeRedis.store.clear(); // simulate eviction
-        await orders.createOrder({ ...base, pesanan: [{ box_type: 'HALF', name: 'Keju', qty: 2 }] });
+        await orders.createOrder({ ...base, pesanan: [{ box_type: 'HALF', name: 'Keju', qty: 2, variant_ids: [3] }] });
         // 10 − 4 − (2 × 0.5) = 5
         expect(fakeRedis.store.get(redisKeys.dailyQuota(1, DATE))).toBe(5);
     });
 
     it('rejects a date without daily quota with a clear message', async () => {
-        await expect(orders.createOrder({ ...base, pickup_date: '2099-02-01', pesanan: [{ box_type: 'FULL', name: 'Keju', qty: 1 }] }))
+        await expect(orders.createOrder({ ...base, pickup_date: '2099-02-01', pesanan: [{ box_type: 'FULL', name: 'Keju', qty: 1, variant_ids: [3] }] }))
             .rejects.toThrow(/belum dibuka/);
     });
 
@@ -88,7 +88,7 @@ describe.skipIf(!hasTestDb)('orders with variant_ids (local Postgres + fake Redi
     });
 
     it('public token: minimal public view, unknown/invalid tokens → 404, Cloudinary-only proof URLs', async () => {
-        const created = await orders.createOrder({ ...base, pesanan: [{ box_type: 'FULL', name: 'Keju', qty: 1 }] });
+        const created = await orders.createOrder({ ...base, pesanan: [{ box_type: 'FULL', name: 'Keju', qty: 1, variant_ids: [3] }] });
         expect(created.public_token).toMatch(/^[0-9a-f-]{36}$/);
 
         const pub = await orders.getPublicOrder(created.public_token);
@@ -104,7 +104,7 @@ describe.skipIf(!hasTestDb)('orders with variant_ids (local Postgres + fake Redi
     });
 
     it('business errors carry HTTP statuses (quota full → 409, unknown order → 404)', async () => {
-        await expect(orders.createOrder({ ...base, pesanan: [{ box_type: 'FULL', name: 'Keju', qty: 11 }] }))
+        await expect(orders.createOrder({ ...base, pesanan: [{ box_type: 'FULL', name: 'Keju', qty: 11, variant_ids: [3] }] }))
             .rejects.toMatchObject({ status: 409 });
         await expect(orders.getOrderById(999999)).rejects.toMatchObject({ status: 404 });
     });
@@ -121,11 +121,11 @@ describe.skipIf(!hasTestDb)('orders with variant_ids (local Postgres + fake Redi
 
     it('store delivery cannot be paid in cash (create, edit, payment-method change)', async () => {
         await expect(orders.createOrder({
-            ...base, payment_method: 'CASH', delivery_method: 'store_delivery', pesanan: [{ box_type: 'FULL', name: 'Keju', qty: 1 }],
+            ...base, payment_method: 'CASH', delivery_method: 'store_delivery', pesanan: [{ box_type: 'FULL', name: 'Keju', qty: 1, variant_ids: [3] }],
         })).rejects.toThrow(/tunai tidak tersedia/);
         expect(fakeRedis.store.size).toBe(0);
 
-        const created = await orders.createOrder({ ...base, payment_method: 'TRANSFER', pesanan: [{ box_type: 'FULL', name: 'Keju', qty: 1 }] });
+        const created = await orders.createOrder({ ...base, payment_method: 'TRANSFER', pesanan: [{ box_type: 'FULL', name: 'Keju', qty: 1, variant_ids: [3] }] });
         await db.pool.query(`UPDATE orders SET delivery_method = 'store_delivery' WHERE id = $1`, [created.id]);
         await expect(orders.updatePaymentMethod(created.id, 'CASH')).rejects.toThrow(/tunai tidak tersedia/);
         await expect(orders.updateOrder(created.id, { payment_method: 'CASH' })).rejects.toThrow(/tunai tidak tersedia/);
@@ -136,10 +136,59 @@ describe.skipIf(!hasTestDb)('orders with variant_ids (local Postgres + fake Redi
         expect((await orders.updatePaymentMethod(created.id, 'CASH')).payment_method).toBe('CASH');
     });
 
-    it('legacy items without variant_ids still work', async () => {
-        const created = await orders.createOrder({ ...base, pesanan: [{ box_type: 'FULL', name: 'Keju', qty: 1 }] });
+    it('created_at is an absolute instant with its zone (timestamptz, M6)', async () => {
+        const before = Date.now();
+        const created = await orders.createOrder({ ...base, pesanan: [{ box_type: 'FULL', name: 'Keju', qty: 1, variant_ids: [3] }] });
+        const fetched = await orders.getOrderById(created.id);
+        // Serialized for the frontend: ISO with "Z", the real moment whatever the DB's TimeZone setting.
+        const iso = JSON.parse(JSON.stringify({ at: fetched.created_at })).at as string;
+        expect(iso).toMatch(/Z$/);
+        expect(Math.abs(new Date(iso).getTime() - before)).toBeLessThan(60_000);
+    });
+
+    it('getOrders: pickup date range filter (I1)', async () => {
+        await db.pool.query(`INSERT INTO daily_quota (date, qty, store_id) VALUES ('2099-01-10', 10, 1)`);
+        const early = await orders.createOrder({ ...base, pesanan: [{ box_type: 'FULL', name: 'Keju', qty: 1, variant_ids: [3] }] });
+        const late = await orders.createOrder({ ...base, pickup_date: '2099-01-10', pesanan: [{ box_type: 'FULL', name: 'Keju', qty: 1, variant_ids: [3] }] });
+        expect((await orders.getOrders({ from: '2099-01-06' })).map((o: any) => o.id)).toEqual([late.id]);
+        expect((await orders.getOrders({ to: '2099-01-05' })).map((o: any) => o.id)).toEqual([early.id]);
+        expect((await orders.getOrders({ from: DATE, to: '2099-01-10' })).map((o: any) => o.id)).toEqual([early.id, late.id]);
+    });
+
+    it('a new order needs variant_ids: no fallback to the plain box price (H1)', async () => {
+        await expect(orders.createOrder({ ...base, pesanan: [{ box_type: 'FULL', name: 'Keju', qty: 1 }] }))
+            .rejects.toMatchObject({ status: 400, message: 'Item 1: pilih minimal 1 rasa' });
+        await expect(orders.createOrder({ ...base, pesanan: [{ box_type: 'FULL', name: 'Keju', qty: 1, variant_ids: [] }] }))
+            .rejects.toMatchObject({ status: 400 });
+        expect(fakeRedis.store.size).toBe(0); // rejected before any quota is reserved
+    });
+
+    it('the stored name comes from variant_ids, not from the client (H2)', async () => {
+        await db.pool.query(`UPDATE variant_price SET price_full = 75000 WHERE variant_id = 3`); // Keju is dearer
+        const created = await orders.createOrder({ ...base, pesanan: [
+            { box_type: 'FULL', name: 'Keju', qty: 1, variant_ids: [2] },          // says Keju, is Vanilla
+            { box_type: 'FULL', name: 'apa saja', qty: 1, variant_ids: [2, 1] },   // mix, any order
+        ] });
+        const fetched = await orders.getOrderById(created.id);
+        expect(fetched.items.map((i: any) => [i.name, Number(i.unit_price)])).toEqual([
+            ['Vanilla', 65000],
+            ['Mix Dark Choco Dan Vanilla', 65000],
+        ]);
+
+        // Editing names the items the same way.
+        await orders.updateOrder(created.id, { pesanan: [{ box_type: 'FULL', name: 'Vanilla', qty: 1, variant_ids: [3] }] });
+        expect((await orders.getOrderById(created.id)).items.map((i: any) => [i.name, Number(i.unit_price)])).toEqual([['Keju', 75000]]);
+    });
+
+    it('legacy items without variant_ids (older orders) can still be read and edited by an admin', async () => {
+        const created = await orders.createOrder({ ...base, pesanan: [{ box_type: 'FULL', name: 'Keju', qty: 1, variant_ids: [3] }] });
+        await db.pool.query('DELETE FROM order_item_variants');
+        await db.pool.query(`UPDATE order_items SET name = 'Rasa Lama' WHERE order_id = $1`, [created.id]);
         const fetched = await orders.getOrderById(created.id);
         expect(fetched.items[0].variant_ids).toEqual([]);
+
+        await orders.updateOrder(created.id, { pesanan: [{ box_type: 'FULL', name: 'Rasa Lama', qty: 2 }] });
+        expect((await orders.getOrderById(created.id)).items.map((i: any) => [i.name, i.qty])).toEqual([['Rasa Lama', 2]]);
     });
 
     it('updateOrder replaces items and variants atomically', async () => {

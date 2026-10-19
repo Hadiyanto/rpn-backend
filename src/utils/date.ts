@@ -5,6 +5,10 @@
 export const todayWIB = (now: Date = new Date()): string =>
     now.toLocaleDateString('en-CA', { timeZone: 'Asia/Jakarta' });
 
+/** The current time of day in Asia/Jakarta as HH:mm (24 h). */
+export const nowTimeWIB = (now: Date = new Date()): string =>
+    now.toLocaleTimeString('en-GB', { timeZone: 'Asia/Jakarta', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' });
+
 /** A calendar date (YYYY-MM-DD) as a Date at 12:00 UTC — the same calendar day in every timezone we care about. */
 const atNoonUTC = (date: string) => new Date(`${date}T12:00:00Z`);
 

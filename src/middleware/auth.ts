@@ -55,13 +55,13 @@ export const PAGE_RULES: Array<{ methods: Method[]; path: RegExp; pages: Page[] 
     { methods: ANY, path: /^\/(capital|debt)(\/|$)/, pages: ['finance'] },
     { methods: ANY, path: /^\/finance\//, pages: ['summary', 'finance'] },
     { methods: ['GET'], path: /^\/pengeluaran$/, pages: ['cashflow', 'finance', 'summary'] },
+    { methods: WRITE, path: /^\/pengeluaran(\/\d+)?$/, pages: ['cashflow', 'finance'] },
     { methods: ANY, path: /^\/stocks(\/|$)/, pages: ['stock', 'config'] },
     { methods: ANY, path: /^\/biteship\/(order|rates)(\/|$)/, pages: ['shipping'] },
     { methods: ANY, path: /^\/(setup-status|variant-hpp|variant-recipe|base-recipe|packaging-rule|variant-price)(\/|$)/, pages: ['config'] },
     { methods: WRITE, path: /^\/(menu|variants|daily-quota|hourly-quota|stores)(\/|$)/, pages: ['config'] },
     { methods: ['GET'], path: /^\/(orders|order\/\d+)$/, pages: ['orders', 'sales', 'analytics', 'cashflow', 'finance'] },
     { methods: WRITE, path: /^\/order\/\d+(\/|$)/, pages: ['orders'] },
-    { methods: ANY, path: /^\/(transaction|transactions|penjualan)(\/|$)/, pages: ['sales'] },
 ];
 
 export const isPublicRoute = (method: string, path: string) =>

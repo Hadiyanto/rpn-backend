@@ -1,15 +1,15 @@
 import { pool, transaction } from '../config/db';
 import { redis, ttlUntilDate } from '../utils/redis';
 import { BOX_UNITS_SQL, boxUnits, remainingQuota } from '../utils/boxUnits';
-import { dayOfWeek } from '../utils/date';
+import { dayOfWeek, nowTimeWIB, todayWIB } from '../utils/date';
 import { redisKeys } from '../utils/redisKeys';
 import { ConflictError, NotFoundError, UpstreamError } from '../utils/errors';
-import { ensureDailyQuotaKey, syncDailyRedisQuota } from './dailyQuota.service';
-import { syncHourlyRedisQuota } from './hourlyQuota.service';
+import { ensureDailyQuotaKey } from './dailyQuota.service';
 import { checkVariantSelection, loadVariantCatalog } from './variantRecipe.service';
 import { applyOrderStockSafe, reverseOrderStockSafe } from './stockDeduction.service';
 import { priceOrderItems } from './variantPrice.service';
-import { getStoreDeliveryOptions, isStoreDeliveryAllowed, type DeliveryQuote } from './biteship.service';
+import { flavorName } from '../utils/flavorName';
+import { cancelActiveDeliveries, getStoreDeliveryOptions, isStoreDeliveryAllowed, type DeliveryQuote } from './biteship.service';
 import type { PoolClient } from 'pg';
 import {
     ValidationError,
@@ -56,6 +56,9 @@ export interface GetOrdersFilter {
     status?: string;
     day?: string; // e.g. 'RABU'
     store_id?: number;
+    /** Pickup date range (YYYY-MM-DD, inclusive). */
+    from?: string;
+    to?: string;
 }
 
 /** Checks every item's variant_ids against the live catalog (active, different flavors, max_flavors). */
@@ -65,6 +68,32 @@ const assertVariantSelections = async (items: ValidOrderItem[]) => {
     items.forEach((item, idx) => {
         if (item.variant_ids) checkVariantSelection(item.variant_ids, item.box_type, catalog, `Item ${idx + 1}`);
     });
+};
+
+/**
+ * New items must name their flavors by id: price, stock deduction and the stored name all follow
+ * variant_ids. Without them an item fell back to the box's menu price and a free-text name, so a
+ * crafted request could buy Choco Special at the plain box price (review 2026-10-19, H1).
+ */
+const assertVariantIdsGiven = (items: ValidOrderItem[]) => {
+    items.forEach((item, idx) => {
+        if (!item.variant_ids || item.variant_ids.length === 0) throw new ValidationError(`Item ${idx + 1}: pilih minimal 1 rasa`);
+    });
+};
+
+/**
+ * The stored item name comes from the chosen variants, never from the client, so the kitchen, WhatsApp
+ * and receipts always show the flavors that were priced (review 2026-10-19, H2). Items without
+ * variant_ids (legacy rows kept by an admin edit) keep their name.
+ */
+const nameItemsByVariants = async <T extends ValidOrderItem>(items: T[]): Promise<T[]> => {
+    const ids = [...new Set(items.flatMap(item => item.variant_ids ?? []))];
+    if (ids.length === 0) return items;
+    const { rows } = await pool.query('SELECT id, variant_name FROM variant WHERE id = ANY($1::int[])', [ids]);
+    const names = new Map(rows.map(r => [Number(r.id), String(r.variant_name)]));
+    return items.map(item => item.variant_ids && item.variant_ids.length > 0
+        ? { ...item, name: flavorName(item.variant_ids.map(id => names.get(id) ?? `#${id}`)) }
+        : item);
 };
 
 /** Every item's box must be an active menu row sold at this store (e.g. a deleted Box Kecil can't be ordered). */
@@ -92,9 +121,13 @@ const assertStoreOpenForOrders = async (storeId: number) => {
 };
 
 /** Delivery options for these (priced) items, as Biteship quotes them right now. */
-const deliveryOptionsFor = async (storeId: number, payload: Pick<CreateOrderPayload, 'delivery_lat' | 'delivery_lng'>, items: PricedOrderItem[]) => {
+const deliveryOptionsFor = async (storeId: number, payload: Pick<CreateOrderPayload, 'delivery_lat' | 'delivery_lng' | 'customer_phone'>, items: PricedOrderItem[]) => {
     if (!payload.delivery_lat || !payload.delivery_lng) throw new ValidationError('Titik lokasi pengiriman wajib diisi');
-    return getStoreDeliveryOptions({ store_id: storeId, lat: Number(payload.delivery_lat), lng: Number(payload.delivery_lng), items })
+    return getStoreDeliveryOptions({
+        store_id: storeId, lat: Number(payload.delivery_lat), lng: Number(payload.delivery_lng), items,
+        // Paxel is only offered to whitelisted numbers.
+        customer_phone: payload.customer_phone,
+    })
         .catch(err => {
             console.error('[Biteship] delivery quote failed:', err?.message ?? err);
             throw new UpstreamError('Ongkir tidak bisa dihitung saat ini. Silakan coba lagi atau pilih metode pengambilan lain.');
@@ -102,7 +135,7 @@ const deliveryOptionsFor = async (storeId: number, payload: Pick<CreateOrderPayl
 };
 
 /**
- * Store delivery (BITESHIP_ENABLED=true, customer allowed by BITESHIP_WHITELIST): re-quotes the courier
+ * Store delivery (always available; Paxel only for PAXEL_WHITELIST): re-quotes the courier
  * the customer picked server-side — the fee is never trusted from the client — so the customer is
  * charged for, and the store books, exactly that courier.
  */
@@ -177,7 +210,33 @@ const assertPaymentAllowedForDelivery = (payment_method: string | null | undefin
     }
 };
 
-export const createOrder = async (payload: CreateOrderPayload) => {
+/** "HH:mm" (one moment), as opposed to a range like "11:00 - 16:00": only a moment belongs to an hourly slot. */
+const isSingleTime = (time: string | null | undefined): time is string => !!time && /^\d{2}:\d{2}$/.test(time);
+
+/**
+ * The store's opening hour and last pickup time, and (unless allowPast, for staff) no time that has
+ * already gone by today (review 2026-10-19, M3). The order form disables these too; this is the check.
+ */
+const assertPickupTimeAllowed = async (storeId: number, date: string, time: string | null | undefined, { allowPast = false } = {}) => {
+    if (!time) return;
+    const hourStr = time.split(':')[0] + ':00';
+    const { rows: [store] } = await pool.query('SELECT open_time, last_pickup_time FROM stores WHERE id = $1', [storeId]);
+    if (store?.open_time && hourStr < store.open_time) {
+        throw new ConflictError(`MOHON MAAF: Toko baru buka jam ${store.open_time}. Silakan pilih jam lain.`);
+    }
+    if (store?.last_pickup_time && time.slice(0, 5) > store.last_pickup_time) {
+        throw new ConflictError(`MOHON MAAF: Pengambilan paling lambat jam ${store.last_pickup_time}. Silakan pilih jam lain.`);
+    }
+    if (!allowPast && date === todayWIB() && time.slice(0, 5) < nowTimeWIB()) {
+        throw new ConflictError('MOHON MAAF: Jam pengambilan sudah lewat. Silakan pilih jam lain.');
+    }
+};
+
+/**
+ * `staff`: the order is entered by logged-in staff (the /orders form), who may book a time that has
+ * already passed today (e.g. a walk-in customer).
+ */
+export const createOrder = async (payload: CreateOrderPayload, options: { staff?: boolean } = {}) => {
     const { payment_method, delivery_method, delivery_lat, delivery_lng, delivery_address, delivery_driver_note, delivery_area_id } = payload;
 
     // Validate everything before touching Redis: a negative qty would otherwise
@@ -187,14 +246,16 @@ export const createOrder = async (payload: CreateOrderPayload) => {
     const customer_name = validateCustomerName(payload.customer_name);
     const customer_phone = validatePhone(payload.customer_phone);
     const validItems = validateOrderItems(payload.pesanan);
+    assertVariantIdsGiven(validItems);
     const pickup_date = validatePickupDate(payload.pickup_date);
     const pickup_time = validatePickupTime(payload.pickup_time);
     const note = validateNote(payload.note);
     assertPaymentAllowedForDelivery(payment_method, delivery_method);
+    await assertPickupTimeAllowed(store_id, pickup_date, pickup_time, { allowPast: options.staff });
     await assertBoxesAvailable(store_id, validItems);
     await assertVariantSelections(validItems);
-    // Prices come from the store's flavor prices, never from the client.
-    const pesanan = await priceItems(store_id, validItems);
+    // Prices and names come from the chosen flavors, never from the client.
+    const pesanan = await priceItems(store_id, await nameItemsByVariants(validItems));
     const delivery = await resolveStoreDelivery(store_id, payload, pesanan);
 
     const requestedBoxQty = boxUnits(pesanan);
@@ -221,19 +282,10 @@ export const createOrder = async (payload: CreateOrderPayload) => {
         // --- 2. HOURLY QUOTA VALIDATION (REDIS ATOMIC DECREMENT) ---
         // Runs against the plain pool (read-only queries), kept OUTSIDE the order DB
         // transaction so that Postgres connection is not held open during Redis round-trips.
-        if (pickup_time) {
+        // Store hours were checked above (assertPickupTimeAllowed). A range ("11:00 - 16:00") or no time
+        // belongs to no hourly slot — the same rule as syncHourlyRedisQuota (review 2026-10-19, M5).
+        if (isSingleTime(pickup_time)) {
             hourStr = pickup_time.split(':')[0] + ':00';
-
-            // Server-side check against the store's opening hour and last pickup time. The frontend
-            // already disables hours outside them, but don't rely solely on client-side filtering.
-            const storeRes = await pool.query('SELECT open_time, last_pickup_time FROM stores WHERE id = $1', [store_id]);
-            const { open_time: openTime, last_pickup_time: lastPickupTime } = storeRes.rows[0] ?? {};
-            if (openTime && hourStr < openTime) {
-                throw new ConflictError(`MOHON MAAF: Toko baru buka jam ${openTime}. Silakan pilih jam lain.`);
-            }
-            if (lastPickupTime && pickup_time.slice(0, 5) > lastPickupTime) {
-                throw new ConflictError(`MOHON MAAF: Pengambilan paling lambat jam ${lastPickupTime}. Silakan pilih jam lain.`);
-            }
 
             // Fetch base capacity and active status from DB
             const hourlyRes = await pool.query(`
@@ -261,9 +313,9 @@ export const createOrder = async (payload: CreateOrderPayload) => {
                         JOIN orders o ON oi.order_id = o.id
                         WHERE o.pickup_date = $1
                         AND o.store_id = $2
-                        AND o.pickup_time LIKE $3
+                        AND o.pickup_time ~ $3
                         AND o.status != 'CANCELLED'
-                    `, [pickup_date, store_id, `${pickup_time.split(':')[0]}:%`]);
+                    `, [pickup_date, store_id, `^${pickup_time.split(':')[0]}:[0-9]{2}$`]);
                     const usedHourlyBox = parseFloat(usedHourlyRes.rows[0].used_box);
                     await redis.set(redisKeys.hourlyQuota(store_id, pickup_date, hourStr), remainingQuota(maxHourly, usedHourlyBox), { nx: true, ex: ttlUntilDate(pickup_date) });
                 }
@@ -299,7 +351,8 @@ export const createOrder = async (payload: CreateOrderPayload) => {
                 customer_name,
                 customer_phone,
                 pickup_date,
-                pickup_time ?? '11:00 - 16:00',
+                // No time = no time (the column default '11:00 - 16:00' used to land in the 11:00 slot).
+                pickup_time ?? null,
                 note ?? null,
                 'UNPAID',
                 payment_method ?? null,
@@ -365,6 +418,14 @@ export const getOrders = async (filters?: GetOrdersFilter) => {
         params.push(filters.store_id);
         where.push(`o.store_id = $${params.length}`);
     }
+    if (filters?.from) {
+        params.push(filters.from);
+        where.push(`o.pickup_date >= $${params.length}::date`);
+    }
+    if (filters?.to) {
+        params.push(filters.to);
+        where.push(`o.pickup_date <= $${params.length}::date`);
+    }
 
     const { rows: data } = await pool.query(`
         SELECT ${ORDER_WITH_ITEMS_COLUMNS}
@@ -405,6 +466,23 @@ export const getOrderById = async (id: number) => {
 const VALID_STATUSES = ['UNPAID', 'PAID', 'CONFIRMED', 'DONE', 'CANCELLED'] as const;
 export type OrderStatus = typeof VALID_STATUSES[number];
 
+/**
+ * Allowed status changes (review 2026-10-19, M8). A cancelled order is reopened to UNPAID first (stock
+ * and quota are taken again, then it follows the normal flow); a DONE order can be corrected back to
+ * CONFIRMED or cancelled, but not to unpaid/paid.
+ */
+export const STATUS_TRANSITIONS: Record<OrderStatus, OrderStatus[]> = {
+    UNPAID: ['PAID', 'CONFIRMED', 'DONE', 'CANCELLED'],
+    PAID: ['UNPAID', 'CONFIRMED', 'DONE', 'CANCELLED'],
+    CONFIRMED: ['PAID', 'DONE', 'CANCELLED'],
+    DONE: ['CONFIRMED', 'CANCELLED'],
+    CANCELLED: ['UNPAID'],
+};
+
+const statusTransitionMessage = (from: string, to: string) => from === 'CANCELLED'
+    ? `Order yang sudah CANCELLED tidak bisa langsung jadi ${to}. Buka ulang ke UNPAID dulu.`
+    : `Status ${from} tidak bisa diubah ke ${to}.`;
+
 export const updateOrderStatus = async (id: number, status: string) => (await changeOrderStatus(id, status)).order;
 
 /**
@@ -420,27 +498,44 @@ export const changeOrderStatus = async (id: number, status: string, options: { e
     }
 
     const oldOrder = await getOrderById(id);
+    if (options.expectedStatus && oldOrder.status !== options.expectedStatus) {
+        throw new ConflictError(`Order #${id} sudah tidak berstatus ${options.expectedStatus}`);
+    }
+    if (oldOrder.status === upperStatus) {
+        // Nothing changes (double click, retried request): no side effects a second time.
+        const { rows: [current] } = await pool.query('SELECT * FROM orders WHERE id = $1', [id]);
+        return { order: current, previousStatus: oldOrder.status as string };
+    }
+    if (!STATUS_TRANSITIONS[oldOrder.status as OrderStatus]?.includes(upperStatus as OrderStatus)) {
+        throw new ConflictError(statusTransitionMessage(oldOrder.status, upperStatus));
+    }
 
+    // Only from the status the checks above saw: a concurrent change makes this a no-op → 409.
     const { rows } = await pool.query(
-        'UPDATE orders SET status = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2 AND ($3::text IS NULL OR status = $3) RETURNING *',
-        [upperStatus, id, options.expectedStatus ?? null]
+        'UPDATE orders SET status = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2 AND status = $3 RETURNING *',
+        [upperStatus, id, oldOrder.status]
     );
     const data = rows[0];
     if (!data && options.expectedStatus) throw new ConflictError(`Order #${id} sudah tidak berstatus ${options.expectedStatus}`);
-    if (!data) throw new NotFoundError(`Order dengan id ${id} tidak ditemukan`);
+    if (!data) throw new ConflictError(`Status order #${id} baru saja berubah. Muat ulang lalu coba lagi.`);
 
     const wasCancelled = oldOrder.status === 'CANCELLED';
     const isCancelled = upperStatus === 'CANCELLED';
 
-    // If order was cancelled or uncancelled, sync quotas to reclaim or use slots
+    // Cancelling gives the order's boxes back to the quota, un-cancelling takes them again.
     if (oldOrder.pickup_date && wasCancelled !== isCancelled) {
-        await syncDailyRedisQuota(oldOrder.store_id, oldOrder.pickup_date);
-        await syncHourlyRedisQuota(oldOrder.pickup_date, oldOrder.store_id);
+        const units = boxUnits(oldOrder.items);
+        await adjustQuota(oldOrder.store_id, oldOrder.pickup_date, oldOrder.pickup_time, isCancelled ? units : -units);
     }
 
     // K1: cancelling gives the raw materials back; un-cancelling takes them again.
     if (!wasCancelled && isCancelled) await reverseOrderStockSafe(id);
     if (wasCancelled && !isCancelled) await applyOrderStockSafe(id);
+
+    // A cancelled store-delivery order must not keep a courier on its way (H6). Never throws.
+    if (isCancelled && oldOrder.delivery_method === 'store_delivery') {
+        await cancelActiveDeliveries(id).catch(err => console.error(`[Biteship] cancel for Order #${id} failed:`, err?.message ?? err));
+    }
 
     return { order: data, previousStatus: oldOrder.status as string };
 };
@@ -454,6 +549,69 @@ export interface UpdateOrderPayload {
     payment_method?: string | null;
     transfer_img_url?: string | null;
 }
+
+/**
+ * Moves an order's boxes in or out of the live Redis counters (+units = give back, −units = take).
+ * A delta instead of recounting from the DB: a recount would wipe the reservation of an order that is
+ * being created right now (Redis already decremented, row not committed yet) and let the slot be sold
+ * twice (review 2026-10-19, L1). A counter that doesn't exist yet is left alone — it is built from the
+ * DB the first time it is needed. Never throws.
+ */
+const adjustQuota = async (storeId: number, date: string, time: string | null | undefined, units: number) => {
+    if (!units) return;
+    const keys = [redisKeys.dailyQuota(storeId, date)];
+    if (isSingleTime(time)) keys.push(redisKeys.hourlyQuota(storeId, date, `${time.slice(0, 2)}:00`));
+    for (const key of keys) {
+        try {
+            if (await redis.exists(key)) await redis.incrbyfloat(key, units);
+        } catch (err) {
+            console.error(`[quota] could not adjust ${key} by ${units}:`, err);
+        }
+    }
+};
+
+/** Box units of the store's other live orders on a date (optionally only those in one hour slot "HH"). */
+const unitsTakenByOthers = async (storeId: number, date: string, orderId: number, hour?: string) => {
+    const { rows: [row] } = await pool.query(`
+        SELECT COALESCE(SUM(${BOX_UNITS_SQL}), 0) AS used
+        FROM order_items oi JOIN orders o ON o.id = oi.order_id
+        WHERE o.store_id = $1 AND o.pickup_date = $2 AND o.status != 'CANCELLED' AND o.id <> $3
+          AND ($4::text IS NULL OR o.pickup_time ~ ('^' || $4::text || ':[0-9]{2}$'))
+    `, [storeId, date, orderId, hour ?? null]);
+    return parseFloat(row.used);
+};
+
+/**
+ * An admin edit (more boxes, another date or time) must fit the same limits as a new order: the date
+ * is open, the daily and hourly quota have room, and the time is within store hours
+ * (review 2026-10-19, L3). Times that already passed are fine for staff. Unchanged edits are not
+ * re-checked, so an already full day can still get its note or name fixed.
+ */
+const assertEditFits = async (old: any, next: { date: string; time: string | null | undefined; units: number }) => {
+    const dateChanged = next.date !== old.pickup_date;
+    const timeChanged = (next.time ?? null) !== (old.pickup_time ?? null);
+    const moreBoxes = next.units > boxUnits(old.items);
+    if (!dateChanged && !timeChanged && !moreBoxes) return;
+
+    if (timeChanged || dateChanged) await assertPickupTimeAllowed(old.store_id, next.date, next.time, { allowPast: true });
+
+    if (dateChanged || moreBoxes) {
+        const { rows: [quota] } = await pool.query('SELECT qty FROM daily_quota WHERE store_id = $1 AND date = $2::date', [old.store_id, next.date]);
+        if (!quota && dateChanged) throw new ValidationError(`MOHON MAAF: Tanggal ${next.date} belum dibuka untuk pemesanan.`);
+        if (quota && (await unitsTakenByOthers(old.store_id, next.date, old.id)) + next.units > parseFloat(quota.qty)) {
+            throw new ConflictError(`MOHON MAAF: Kuota Box untuk tanggal ${next.date} sudah penuh.`);
+        }
+    }
+
+    if (isSingleTime(next.time)) {
+        const hour = next.time.slice(0, 2);
+        const { rows: [slot] } = await pool.query(
+            'SELECT qty FROM hourly_quota WHERE store_id = $1 AND time_str = $2 AND is_active = true', [old.store_id, `${hour}:00`]);
+        if (slot && (await unitsTakenByOthers(old.store_id, next.date, old.id, hour)) + next.units > parseFloat(slot.qty)) {
+            throw new ConflictError(`MOHON MAAF: Kuota Jam ${hour}:00 di tanggal ${next.date} sudah penuh. Silakan pilih jam lain.`);
+        }
+    }
+};
 
 export const updateOrder = async (id: number, payload: UpdateOrderPayload) => {
     const { payment_method } = payload;
@@ -472,11 +630,24 @@ export const updateOrder = async (id: number, payload: UpdateOrderPayload) => {
         : (validatePickupTime(payload.pickup_time) ?? null);
     const note = validateNote(payload.note);
     let pesanan: PricedOrderItem[] | undefined;
+    if (validItems && oldOrder.payment_method === 'DOKU' && oldOrder.status === 'UNPAID' && oldOrder.doku_invoice_number) {
+        // The customer pays the amount of the existing DOKU checkout; a new total would make that payment
+        // fail the amount check and leave the order UNPAID (review 2026-10-19, H5).
+        throw new ConflictError('Item order DOKU yang belum dibayar tidak bisa diubah. Batalkan order ini dan buat order baru.');
+    }
     if (validItems) {
         await assertBoxesAvailable(oldOrder.store_id, validItems);
         await assertVariantSelections(validItems);
-        // Edited items are priced again at today's prices.
-        pesanan = await priceItems(oldOrder.store_id, validItems);
+        // Edited items are priced (and named) again from today's flavors and prices.
+        pesanan = await priceItems(oldOrder.store_id, await nameItemsByVariants(validItems));
+    }
+
+    if (oldOrder.status !== 'CANCELLED') {
+        await assertEditFits(oldOrder, {
+            date: pickup_date ?? oldOrder.pickup_date,
+            time: pickup_time !== undefined ? pickup_time : oldOrder.pickup_time,
+            units: pesanan ? boxUnits(pesanan) : boxUnits(oldOrder.items),
+        });
     }
 
     // 1+2. Header update and item replacement in ONE transaction, so a failed item insert
@@ -519,15 +690,11 @@ export const updateOrder = async (id: number, payload: UpdateOrderPayload) => {
         await applyOrderStockSafe(id);
     }
 
-    // Forces generic recalculation of quota usage to prevent Redis ghost slots
-    if (oldOrder && oldOrder.pickup_date) {
-        await syncDailyRedisQuota(oldOrder.store_id, oldOrder.pickup_date);
-        await syncHourlyRedisQuota(oldOrder.pickup_date, oldOrder.store_id);
-    }
-    if (pickup_date && pickup_date !== oldOrder?.pickup_date) {
-        // If the date changed, we must sync the new date as well
-        await syncDailyRedisQuota(oldOrder.store_id, pickup_date);
-        await syncHourlyRedisQuota(pickup_date, oldOrder.store_id);
+    // Quota: give back what the order held (old date/time/boxes) and take what it holds now. A cancelled
+    // order holds nothing either way.
+    if (oldOrder.status !== 'CANCELLED' && oldOrder.pickup_date) {
+        await adjustQuota(oldOrder.store_id, oldOrder.pickup_date, oldOrder.pickup_time, boxUnits(oldOrder.items));
+        await adjustQuota(oldOrder.store_id, order.pickup_date, order.pickup_time, -(pesanan ? boxUnits(pesanan) : boxUnits(oldOrder.items)));
     }
 
     if (pesanan) {

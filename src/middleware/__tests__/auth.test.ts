@@ -52,7 +52,10 @@ describe('page rules', () => {
         expect(requiredPages('PUT', '/stores/1')).toEqual(['config']);
         expect(requiredPages('GET', '/orders')).toContain('sales');
         expect(requiredPages('PATCH', '/order/5/status')).toEqual(['orders']);
-        expect(requiredPages('POST', '/pengeluaran')).toBeNull(); // expenses form: any login
+        // Expenses are entered/fixed on /cashflow (the old /expenses page is gone): cashflow or finance.
+        expect(requiredPages('POST', '/pengeluaran')).toEqual(['cashflow', 'finance']);
+        expect(requiredPages('DELETE', '/pengeluaran/7')).toEqual(['cashflow', 'finance']);
+        expect(requiredPages('GET', '/pengeluaran')).toEqual(['cashflow', 'finance', 'summary']);
     });
 
     it('superadmin/owner pass every rule, employees only their pages', () => {

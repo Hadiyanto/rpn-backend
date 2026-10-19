@@ -11,6 +11,8 @@ import {
 } from '../utils/doku';
 import { changeOrderStatus, getOrderById, getOrderIdByPublicToken } from './order.service';
 import { onOrderStatusChanged } from './orderEvents.service';
+import { sendPushToAll } from './push.service';
+import { startRecurringJob } from '../utils/recurringJob';
 
 // DOKU Checkout flow (DOKU_PAYMENT=true):
 //   1. POST /order creates the order (UNPAID, payment_method DOKU), then startDokuCheckout() asks DOKU
@@ -144,6 +146,12 @@ export const startDokuCheckout = async <T extends CheckoutOrder>(order: T) => {
 
 type DokuOutcome = 'paid' | 'cancelled' | 'ignored';
 
+/** Push to admins about a payment that needs a human (wrong amount, paid after cancel); never throws. */
+const alertAdmins = (orderId: number, title: string, body: string) => {
+    sendPushToAll({ title, body, url: `/orders?order=${orderId}`, tag: `doku-${orderId}` })
+        .catch(err => console.error(`[DOKU] admin alert for order #${orderId} failed:`, err?.message ?? err));
+};
+
 /**
  * Applies a DOKU transaction status to the order behind `invoiceNumber`. Idempotent: duplicate
  * notifications (DOKU retries, notification + check status) only take effect once.
@@ -166,22 +174,29 @@ const applyDokuStatus = async (
     if (status === 'SUCCESS') {
         const order = await getOrderById(row.id);
         const expected = payableAmount(Number(order.total_amount), order.delivery_fee);
-        if (amount !== undefined && Math.round(amount) !== expected) {
-            console.error(`[DOKU] amount mismatch for order #${row.id}: paid ${amount}, expected ${expected}`);
-            return 'ignored';
-        }
 
-        // Only the first SUCCESS claims the payment; later duplicates fall through.
+        // Only the first SUCCESS claims the payment; later duplicates fall through (also for the
+        // problem cases below, so admins are alerted once per payment).
         const claimed = await pool.query(
             'UPDATE orders SET doku_paid_at = CURRENT_TIMESTAMP, doku_paid_channel = $2 WHERE id = $1 AND doku_paid_at IS NULL',
             [row.id, channel ?? null]
         );
         if (claimed.rowCount === 0) return 'ignored';
 
+        if (amount !== undefined && Math.round(amount) !== expected) {
+            // The customer paid, but not the order's current total: leave the status for an admin.
+            console.error(`[DOKU] amount mismatch for order #${row.id}: paid ${amount}, expected ${expected}`);
+            alertAdmins(row.id, `⚠️ Pembayaran DOKU tidak cocok · Order #${row.id}`,
+                `${order.customer_name} membayar Rp ${Math.round(amount).toLocaleString('id-ID')}, total order Rp ${expected.toLocaleString('id-ID')}. Status masih ${order.status} — cek dan sesuaikan manual.`);
+            return 'ignored';
+        }
+
         if (order.status !== 'UNPAID') {
             // E.g. the order expired and was cancelled, or an admin already moved it on — leave the
-            // status alone, admins see doku_paid_at on the order.
+            // status alone, but tell admins (a cancelled order that got paid needs a refund or reopening).
             console.warn(`[DOKU] order #${row.id} paid via DOKU while in status ${order.status}; status left unchanged`);
+            alertAdmins(row.id, `💸 Order #${row.id} dibayar via DOKU tapi ${order.status}`,
+                `${order.customer_name} membayar Rp ${expected.toLocaleString('id-ID')}. ${order.status === 'CANCELLED' ? 'Order sudah dibatalkan: refund atau aktifkan ulang.' : 'Status dibiarkan, cek order.'}`);
             return 'ignored';
         }
 
@@ -192,6 +207,8 @@ const applyDokuStatus = async (
         });
         if (!changed) {
             console.warn(`[DOKU] order #${row.id} paid via DOKU but no longer UNPAID; status left unchanged`);
+            alertAdmins(row.id, `💸 Order #${row.id} dibayar via DOKU tapi status sudah berubah`,
+                `${order.customer_name} membayar Rp ${expected.toLocaleString('id-ID')} saat order diubah/dibatalkan. Cek order: refund atau aktifkan ulang.`);
             return 'ignored';
         }
         const { previousStatus } = changed;
@@ -231,6 +248,52 @@ export const handleDokuNotification = async (
     const amount = body?.order?.amount === undefined ? undefined : Number(body.order.amount);
     return applyDokuStatus(invoiceNumber, status, amount, body?.channel?.id);
 };
+
+/** How long after DOKU's expiry an unpaid checkout is closed (late notifications get this long). */
+const EXPIRY_GRACE_MINUTES = 5;
+
+/**
+ * Closes UNPAID DOKU orders whose checkout expired, so they stop holding quota and raw materials
+ * (review 2026-10-19, H3). DOKU is asked first, so a payment that landed without a notification still
+ * makes the order PAID; 404 = the customer never picked a payment method → expired. Other DOKU errors
+ * leave the order for the next round.
+ */
+export const expireUnpaidDokuOrders = async () => {
+    if (isDokuDevBypass()) return { checked: 0, cancelled: 0, paid: 0 };
+    const { rows } = await pool.query(`
+        SELECT id, doku_invoice_number FROM orders
+        WHERE payment_method = 'DOKU' AND status = 'UNPAID' AND doku_paid_at IS NULL
+          AND doku_invoice_number IS NOT NULL AND doku_expired_at IS NOT NULL
+          AND doku_expired_at < now() - make_interval(mins => $1)
+        ORDER BY id LIMIT 50`, [EXPIRY_GRACE_MINUTES]);
+    let cancelled = 0, paid = 0;
+    for (const order of rows) {
+        let status: string | undefined, amount: number | undefined, channel: string | undefined;
+        try {
+            const res = await getDokuOrderStatus(order.doku_invoice_number);
+            status = res.transaction?.status === 'SUCCESS' ? 'SUCCESS' : 'EXPIRED';
+            amount = res.order?.amount;
+            channel = res.channel?.id;
+        } catch (err) {
+            if ((err as { httpStatus?: number }).httpStatus !== 404) {
+                console.warn(`[DOKU] expiry check for order #${order.id} failed, retrying next round:`, (err as Error).message);
+                continue;
+            }
+            status = 'EXPIRED';
+        }
+        const outcome = await applyDokuStatus(order.doku_invoice_number, status, amount, channel);
+        if (outcome === 'cancelled') cancelled++;
+        if (outcome === 'paid') paid++;
+    }
+    return { checked: rows.length, cancelled, paid };
+};
+
+/** DOKU_EXPIRY_MINUTES (default 5; 0 = off): how often expireUnpaidDokuOrders runs. */
+export const startDokuExpiryJob = () =>
+    startRecurringJob('[DOKU] expiry check', 'DOKU_EXPIRY_MINUTES', 5, async () => {
+        const { checked, cancelled, paid } = await expireUnpaidDokuOrders();
+        return cancelled || paid ? `${checked} expired checkout(s): ${cancelled} cancelled, ${paid} paid` : null;
+    });
 
 /**
  * Asks DOKU for the current status of an UNPAID DOKU order (customer is back from the checkout page)

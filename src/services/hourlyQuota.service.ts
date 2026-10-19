@@ -50,7 +50,9 @@ export const getHourlyAvailability = async (date: string, store_id: number): Pro
 
     // If cache miss, calculate DB usage and save to Redis, then refetch Redis.
     if (hasCacheMiss) {
-        await syncHourlyRedisQuota(date, store_id); // This runs the heavy PG query ONCE
+        // Only fills the missing keys (NX): overwriting the others would wipe reservations of orders that
+        // are being created right now (review 2026-10-19, L1).
+        await syncHourlyRedisQuota(date, store_id, { onlyMissing: true }); // This runs the heavy PG query ONCE
         redisVals = await redis.mget(...keys); // Refetch fresh values
     }
 
@@ -113,7 +115,9 @@ export const deleteHourlyQuota = async (id: number) => {
     return true;
 };
 
-export const syncHourlyRedisQuota = async (date: string, store_id: number) => {
+// Only a single "HH:mm" counts towards its hour (ranges such as the old default "11:00 - 16:00" and
+// orders without a time belong to no slot) — the same rule as createOrder.
+export const syncHourlyRedisQuota = async (date: string, store_id: number, { onlyMissing = false } = {}) => {
     try {
         const res = await pool.query(`
             SELECT
@@ -121,7 +125,7 @@ export const syncHourlyRedisQuota = async (date: string, store_id: number) => {
                 hq.qty,
                 COALESCE(SUM(${BOX_UNITS_SQL}), 0) as used_qty
             FROM hourly_quota hq
-            LEFT JOIN orders o ON o.pickup_date = $1 AND o.store_id = hq.store_id AND o.pickup_time LIKE (substring(hq.time_str, 1, 2) || '%') AND o.status != 'CANCELLED'
+            LEFT JOIN orders o ON o.pickup_date = $1 AND o.store_id = hq.store_id AND o.pickup_time ~ ('^' || substring(hq.time_str, 1, 2) || ':[0-9]{2}$') AND o.status != 'CANCELLED'
             LEFT JOIN order_items oi ON oi.order_id = o.id
             WHERE hq.store_id = $2
             GROUP BY hq.time_str, hq.qty
@@ -131,7 +135,7 @@ export const syncHourlyRedisQuota = async (date: string, store_id: number) => {
             const rQty = remainingQuota(parseFloat(row.qty), parseFloat(row.used_qty));
 
             const ex = ttlUntilDate(date);
-            await redis.set(redisKeys.hourlyQuota(store_id, date, row.time_str), rQty, { ex });
+            await redis.set(redisKeys.hourlyQuota(store_id, date, row.time_str), rQty, onlyMissing ? { nx: true, ex } : { ex });
         }
     } catch (err) {
         console.error(`Failed to sync hourly Redis quotas for store ${store_id}, date: ${date}`, err);
